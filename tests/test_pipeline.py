@@ -23,6 +23,7 @@ from src.transformers.combine import Combine
 from src.transformers.debug import Debug
 from src.transformers.gaussian import Gaussian
 from src.transformers.hist_equalize import HistEqualize
+from src.transformers.laplacian_sharp import LaplacianSharp
 from src.transformers.linear_scale import LinearScale
 from src.transformers.median import Median
 from src.transformers.resize import Resize
@@ -353,6 +354,11 @@ class PipelineTests(unittest.TestCase):
                 "bilateral",
                 {"diameter": 3, "sigma-color": 25.0, "sigma-space": 3.0},
             ),
+            (
+                LaplacianSharp,
+                "laplacian-sharp",
+                {"amount": 0.25, "kernel-size": 3, "iterations": 2},
+            ),
         ]
         frames = [
             np.arange(25, dtype=np.uint8).reshape((5, 5)),
@@ -384,6 +390,7 @@ class PipelineTests(unittest.TestCase):
             Median("f", {"kernel-size": 3}),
             Gaussian("f", {"kernel-size": 3}),
             Bilateral("f", {"diameter": 3, "sigma-color": 100.0}),
+            LaplacianSharp("f", {"kernel-size": 3}),
         ]
 
         for transform in cases:
@@ -400,6 +407,7 @@ class PipelineTests(unittest.TestCase):
             Unsharp("f", {"kernel_size": 3}),
             Gaussian("f", {"kernel_size": 3, "sigma_x": 1.0, "sigma_y": 1.0}),
             Bilateral("f", {"sigma_color": 20.0, "sigma_space": 2.0}),
+            LaplacianSharp("f", {"kernel_size": 3}),
         ]
 
         for transform in transforms:
@@ -420,6 +428,11 @@ class PipelineTests(unittest.TestCase):
             (Bilateral, {"diameter": 0}),
             (Bilateral, {"sigma-color": -1.0}),
             (Bilateral, {"sigma-space": -1.0}),
+            (LaplacianSharp, {"amount": -0.1}),
+            (LaplacianSharp, {"kernel-size": 2}),
+            (LaplacianSharp, {"iterations": 0}),
+            (LaplacianSharp, {"mode": "wrong"}),
+            (LaplacianSharp, {"scale": -1.0}),
         ]
         for transform_cls, params in invalid_configurations:
             with self.subTest(transform=transform_cls.__name__, params=params):
@@ -430,6 +443,29 @@ class PipelineTests(unittest.TestCase):
             Median("f", {"kernel-size": 7}).process(
                 {"in": packet(np.zeros((5, 5), dtype=np.uint16), fmt="gray")}
             )
+
+    def test_laplacian_sharp_iterations_change_output(self) -> None:
+        frame = np.array(
+            [
+                [0, 0, 0, 0, 0],
+                [0, 100, 100, 100, 0],
+                [0, 100, 200, 100, 0],
+                [0, 100, 100, 100, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            dtype=np.uint16,
+        )
+        once = LaplacianSharp("lap", {"amount": 0.25, "iterations": 1}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+        twice = LaplacianSharp("lap", {"amount": 0.25, "iterations": 2}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(once.data.dtype, np.uint16)
+        self.assertEqual(twice.data.dtype, np.uint16)
+        self.assertEqual(twice.metadata.extra["filter_params"]["iterations"], 2)
+        self.assertFalse(np.array_equal(once.data, twice.data))
 
     def test_debug_default_prints_once_and_passes_same_packet(self) -> None:
         transform = Debug("dbg", {})
@@ -640,7 +676,8 @@ class PipelineTests(unittest.TestCase):
     def test_cli_parser_accepts_hyphenated_filter_params(self) -> None:
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! Unsharp kernel-size=3 ! gaussian sigma-x=1.0 "
-            "! bilateral sigma-color=25 sigma-space=3 ! filesink path=out.mp4"
+            "! bilateral sigma-color=25 sigma-space=3 ! laplacian-sharp "
+            "kernel-size=3 iterations=2 ! filesink path=out.mp4"
         )
 
         self.assertEqual(spec.elements[1].type, "Unsharp")
@@ -650,6 +687,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[3].type, "bilateral")
         self.assertEqual(spec.elements[3].params["sigma-color"], 25)
         self.assertEqual(spec.elements[3].params["sigma-space"], 3)
+        self.assertEqual(spec.elements[4].type, "laplacian-sharp")
+        self.assertEqual(spec.elements[4].params["kernel-size"], 3)
+        self.assertEqual(spec.elements[4].params["iterations"], 2)
 
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
@@ -682,6 +722,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("params=[enabled, every-seconds, every-frames", output)
         self.assertIn("hist_equalize:", output)
         self.assertIn("params=[bins, output-bits, output-max]", output)
+        self.assertIn("laplacian-sharp:", output)
+        self.assertIn(
+            "params=[amount, kernel-size, iterations, mode, scale, delta]",
+            output,
+        )
         self.assertIn("linear-scale:", output)
         self.assertIn(
             "params=[otype, omin, omax, min, max, perc, perc-down, perc-up]",
@@ -737,6 +782,11 @@ class PipelineTests(unittest.TestCase):
                 "diameter: int | optional",
                 "sigma-color: float | optional",
                 "sigma-space: float | optional",
+            ],
+            "laplacian-sharp": [
+                "amount: float | optional",
+                "iterations: int | optional",
+                "mode: str | optional",
             ],
         }
 

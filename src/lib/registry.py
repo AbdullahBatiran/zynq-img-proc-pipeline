@@ -58,6 +58,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.debug import Debug
     from src.transformers.gaussian import Gaussian
     from src.transformers.hist_equalize import HistEqualize
+    from src.transformers.laplacian_sharp import LaplacianSharp
     from src.transformers.linear_scale import LinearScale
     from src.transformers.median import Median
     from src.transformers.resize import Resize
@@ -72,6 +73,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Median,
         Gaussian,
         Bilateral,
+        LaplacianSharp,
         Debug,
         Combine,
         FileSink,
