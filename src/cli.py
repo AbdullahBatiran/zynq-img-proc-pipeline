@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import re
+import shlex
 import sys
+from pathlib import Path
 
 from src.lib.cli_parse import parse_pipeline_expression
 from src.lib.contracts import ElementContract, ParameterContract, PortContract
@@ -17,7 +20,23 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run a pipeline expression")
-    run_parser.add_argument("expression", help="Pipeline expression")
+    run_parser.add_argument(
+        "expression",
+        nargs="?",
+        help="Pipeline expression, or a script file path when it exists",
+    )
+    run_parser.add_argument(
+        "script_args",
+        nargs="*",
+        help="Arguments used to replace $1, $2, ... in a script file",
+    )
+    run_parser.add_argument(
+        "-f",
+        "--file",
+        dest="expression_file",
+        default=None,
+        help="Read the pipeline expression from a script file",
+    )
     run_parser.add_argument(
         "--max-frames",
         type=int,
@@ -55,12 +74,64 @@ def main(argv: list[str] | None = None) -> int:
         print(_format_element_description(args.element, element_cls.contract()))
         return 0
     if args.command == "run":
-        spec = parse_pipeline_expression(args.expression)
+        try:
+            expression = _resolve_run_expression(
+                args.expression, args.expression_file, args.script_args
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        spec = parse_pipeline_expression(expression)
         Pipeline.from_spec(spec).run(max_frames=args.max_frames)
         return 0
 
     parser.print_help()
     return 2
+
+
+def _resolve_run_expression(
+    expression: str | None, expression_file: str | None, script_args: list[str]
+) -> str:
+    if expression_file is not None:
+        placeholder_args = (
+            [expression] if expression is not None else []
+        ) + script_args
+        return _load_pipeline_expression(Path(expression_file), placeholder_args)
+
+    if expression is None:
+        raise ValueError("run requires a pipeline expression or --file path")
+
+    expression_path = Path(expression)
+    if expression_path.is_file():
+        return _load_pipeline_expression(expression_path, script_args)
+
+    if script_args:
+        raise ValueError("Extra run arguments are only supported with script files")
+    return expression
+
+
+def _load_pipeline_expression(path: Path, args: list[str]) -> str:
+    try:
+        expression = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Could not read pipeline script {str(path)!r}: {exc}") from exc
+    return _substitute_placeholders(expression, args)
+
+
+def _substitute_placeholders(expression: str, args: list[str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        if index <= 0:
+            raise ValueError("Pipeline script placeholders start at $1")
+        try:
+            value = args[index - 1]
+        except IndexError as exc:
+            raise ValueError(
+                f"Missing value for pipeline script placeholder ${index}"
+            ) from exc
+        return shlex.quote(value)
+
+    return re.sub(r"\$(\d+)", replace, expression)
 
 
 def _format_verbose_element(name: str, contract: ElementContract) -> str:

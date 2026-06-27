@@ -656,6 +656,20 @@ class PipelineTests(unittest.TestCase):
         ])
         self.assertEqual(len(spec.connections), 2)
 
+    def test_cli_parser_allows_linear_expression_across_lines(self) -> None:
+        spec = parse_pipeline_expression(
+            """
+            filesrc path=in.mp4
+            ! resize width=4 height=4
+            ! filesink path=out.mp4
+            """
+        )
+        self.assertEqual(
+            [element.type for element in spec.elements],
+            ["filesrc", "resize", "filesink"],
+        )
+        self.assertEqual(len(spec.connections), 2)
+
     def test_cli_parser_accepts_hyphenated_linear_scale_params(self) -> None:
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! linear-scale otype=uint8 perc-up=0.01 "
@@ -704,6 +718,83 @@ class PipelineTests(unittest.TestCase):
         ids = {element.id for element in spec.elements}
         self.assertTrue({"a", "b", "ra", "rb", "c", "filesink"}.issubset(ids))
         self.assertIn(ConnectionSpec("rb", "out", "c", "right"), spec.connections)
+
+    def test_cli_run_loads_pipeline_script_with_placeholders(self) -> None:
+        class DummyPipeline:
+            def __init__(self) -> None:
+                self.max_frames = None
+
+            def run(self, max_frames=None) -> None:
+                self.max_frames = max_frames
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script_path = Path(tmp) / "pipeline.zpipe"
+            script_path.write_text(
+                """
+                # Long pipelines can be split across lines.
+                filesrc path=$1
+                ! resize width=4 height=4
+                ! filesink path=$2
+                """,
+                encoding="utf-8",
+            )
+            dummy = DummyPipeline()
+            with patch("src.cli.Pipeline.from_spec", return_value=dummy) as from_spec:
+                exit_code = cli_main(
+                    [
+                        "run",
+                        "--file",
+                        str(script_path),
+                        "input video.mp4",
+                        "out.mp4",
+                        "--max-frames",
+                        "7",
+                    ]
+                )
+
+            spec = from_spec.call_args.args[0]
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(dummy.max_frames, 7)
+            self.assertEqual(spec.elements[0].params["path"], "input video.mp4")
+            self.assertEqual(spec.elements[2].params["path"], "out.mp4")
+
+    def test_cli_run_accepts_script_path_as_expression(self) -> None:
+        class DummyPipeline:
+            def run(self, max_frames=None) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script_path = Path(tmp) / "pipeline.zpipe"
+            script_path.write_text(
+                "filesrc path=$1 ! filesink path=$2",
+                encoding="utf-8",
+            )
+            with patch(
+                "src.cli.Pipeline.from_spec", return_value=DummyPipeline()
+            ) as from_spec:
+                exit_code = cli_main(["run", str(script_path), "in.mp4", "out.mp4"])
+
+            spec = from_spec.call_args.args[0]
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(spec.elements[0].params["path"], "in.mp4")
+            self.assertEqual(spec.elements[1].params["path"], "out.mp4")
+
+    def test_cli_run_reports_missing_script_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script_path = Path(tmp) / "pipeline.zpipe"
+            script_path.write_text(
+                "filesrc path=$1 ! filesink path=$2",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli_main(["run", "--file", str(script_path), "in.mp4"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "Missing value for pipeline script placeholder $2",
+                stderr.getvalue(),
+            )
 
     def test_cli_list_elements_verbose_shows_parameter_names(self) -> None:
         stdout = io.StringIO()

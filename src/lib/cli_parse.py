@@ -57,18 +57,43 @@ def parse_pipeline_expression(expression: str) -> PipelineSpec:
 
 def _statements(expression: str) -> list[list[str]]:
     statements: list[list[str]] = []
+    pending = ""
     for raw_line in expression.splitlines():
         line = raw_line.strip()
-        if not line:
+        if not line or line.startswith("#"):
             continue
-        pieces = [piece.strip() for piece in _split_unquoted(line, "!")]
-        if len(pieces) >= 2:
-            statements.append(pieces)
+        is_continuation_line = line.startswith("!")
+        if pending and (line.startswith("!") or _ends_with_unquoted(pending, "!")):
+            pending = f"{pending} {line}"
+        else:
+            _append_statement(statements, pending)
+            pending = line
+        if not is_continuation_line and _is_complete_statement(pending):
+            _append_statement(statements, pending)
+            pending = ""
+    _append_statement(statements, pending)
+
     if not statements:
-        pieces = [piece.strip() for piece in _split_unquoted(expression.strip(), "!")]
-        if len(pieces) >= 2:
-            statements.append(pieces)
+        _append_statement(statements, expression.strip())
     return statements
+
+
+def _append_statement(statements: list[list[str]], statement: str) -> None:
+    if not statement:
+        return
+    pieces = [piece.strip() for piece in _split_unquoted(statement, "!")]
+    if len(pieces) >= 2 and pieces[0] and pieces[-1]:
+        statements.append(pieces)
+
+
+def _is_complete_statement(statement: str) -> bool:
+    pieces = [piece.strip() for piece in _split_unquoted(statement, "!")]
+    return len(pieces) >= 2 and bool(pieces[0]) and bool(pieces[-1])
+
+
+def _ends_with_unquoted(text: str, separator: str) -> bool:
+    pieces = _split_unquoted(text, separator)
+    return len(pieces) >= 2 and pieces[-1].strip() == ""
 
 
 def _parse_segment(
