@@ -10,11 +10,13 @@ from pathlib import Path
 
 from src.lib.cli_parse import parse_pipeline_expression
 from src.lib.contracts import ElementContract, ParameterContract, PortContract
+from src.lib.opencv_qt import configure_opencv_qt_environment
 from src.lib.pipeline import Pipeline
 from src.lib.registry import default_registry, register_builtin_elements
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_opencv_qt_environment()
     register_builtin_elements()
     parser = argparse.ArgumentParser(prog="zpipe")
     subparsers = parser.add_subparsers(dest="command")

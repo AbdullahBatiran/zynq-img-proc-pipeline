@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 from src.cli import main as cli_main
 from src.lib.cli_parse import parse_pipeline_expression
 from src.lib.elements import PipelineContext
+from src.lib.opencv_qt import configure_opencv_qt_environment
 from src.lib.packets import FrameMetadata, FramePacket, new_packet_id
 from src.lib.pipeline import ConnectionSpec, ElementSpec, Pipeline, PipelineSpec
 from src.lib.registry import register_builtin_elements
@@ -924,6 +926,29 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("Unknown element 'missing'", stderr.getvalue())
+
+    def test_opencv_qt_environment_sets_safe_defaults(self) -> None:
+        with patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}, clear=True):
+            configure_opencv_qt_environment()
+
+            self.assertEqual(os.environ["QT_QPA_PLATFORM"], "xcb")
+            self.assertTrue(Path(os.environ["QT_QPA_FONTDIR"]).is_dir())
+
+    def test_opencv_qt_environment_preserves_valid_user_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "XDG_SESSION_TYPE": "wayland",
+                    "QT_QPA_PLATFORM": "wayland",
+                    "QT_QPA_FONTDIR": tmp,
+                },
+                clear=True,
+            ):
+                configure_opencv_qt_environment()
+
+                self.assertEqual(os.environ["QT_QPA_PLATFORM"], "wayland")
+                self.assertEqual(os.environ["QT_QPA_FONTDIR"], tmp)
 
     def test_displaysink_uses_explicit_or_metadata_fps(self) -> None:
         frame = packet(np.zeros((4, 5, 3), dtype=np.uint8))

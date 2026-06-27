@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.lib.opencv_qt import configure_opencv_qt_environment
+
+configure_opencv_qt_environment()
 import cv2
+configure_opencv_qt_environment()
 import numpy as np
 
 from src.lib.contracts import ElementContract, ParameterContract, PortContract
