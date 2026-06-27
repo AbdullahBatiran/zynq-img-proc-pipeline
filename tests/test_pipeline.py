@@ -20,6 +20,7 @@ from src.sinks.displaysink import DisplaySink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
 from src.transformers.combine import Combine
 from src.transformers.hist_equalize import HistEqualize
+from src.transformers.linear_scale import LinearScale
 from src.transformers.resize import Resize
 
 
@@ -153,6 +154,130 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             transform.process({"in": packet(frame, fmt="bgr")})
 
+    def test_linear_scale_default_uint8_maps_min_max(self) -> None:
+        transform = LinearScale("scale", {})
+        frame = np.array([[10, 15], [20, 30]], dtype=np.uint8)
+        source = packet(frame, fmt="gray")
+        result = transform.process({"in": source})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(int(result.data.min()), 0)
+        self.assertEqual(int(result.data.max()), 255)
+        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.extra["linear_scale_input_min"], 10.0)
+        self.assertEqual(result.metadata.extra["linear_scale_input_max"], 30.0)
+        self.assertEqual(result.metadata.extra["linear_scale_output_type"], "uint8")
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_linear_scale_default_uint16_maps_min_max(self) -> None:
+        transform = LinearScale("scale", {})
+        frame = np.array([[100, 1100], [2100, 4100]], dtype=np.uint16)
+        result = transform.process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(int(result.data.min()), 0)
+        self.assertEqual(int(result.data.max()), 65535)
+        self.assertEqual(result.metadata.depth, 16)
+
+    def test_linear_scale_otype_uint8_updates_metadata_depth(self) -> None:
+        transform = LinearScale("scale", {"otype": "uint8"})
+        frame = np.array([[0, 32768], [49152, 65535]], dtype=np.uint16)
+        result = transform.process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.extra["linear_scale_output_max"], 255.0)
+        self.assertEqual(result.metadata.extra["linear_scale_output_type"], "uint8")
+
+    def test_linear_scale_custom_output_range(self) -> None:
+        transform = LinearScale("scale", {"omin": 10, "omax": 20})
+        frame = np.array([[0, 50], [100, 200]], dtype=np.uint8)
+        result = transform.process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.tolist(), [[10, 12], [15, 20]])
+        self.assertEqual(result.metadata.extra["linear_scale_output_min"], 10.0)
+        self.assertEqual(result.metadata.extra["linear_scale_output_max"], 20.0)
+
+    def test_linear_scale_supplied_min_max_and_one_sided_ranges(self) -> None:
+        frame = np.array([[10, 20], [30, 40]], dtype=np.uint8)
+
+        with_min = LinearScale("scale", {"min": 0}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+        with_max = LinearScale("scale", {"max": 50}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+        with_both = LinearScale("scale", {"min": 10, "max": 40}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(with_min.metadata.extra["linear_scale_input_min"], 0.0)
+        self.assertEqual(with_min.metadata.extra["linear_scale_input_max"], 40.0)
+        self.assertEqual(with_max.metadata.extra["linear_scale_input_min"], 10.0)
+        self.assertEqual(with_max.metadata.extra["linear_scale_input_max"], 50.0)
+        self.assertEqual(with_both.data.tolist(), [[0, 85], [170, 255]])
+
+    def test_linear_scale_percentile_ranges(self) -> None:
+        frame = np.array([0, 10, 20, 30, 40], dtype=np.uint8).reshape((1, 5))
+
+        symmetric = LinearScale("scale", {"perc": 0.25}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+        lower_only = LinearScale("scale", {"perc-down": 0.25}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+        upper_only = LinearScale("scale", {"perc_up": 0.25}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(symmetric.metadata.extra["linear_scale_input_min"], 10.0)
+        self.assertEqual(symmetric.metadata.extra["linear_scale_input_max"], 30.0)
+        self.assertEqual(lower_only.metadata.extra["linear_scale_input_min"], 10.0)
+        self.assertEqual(lower_only.metadata.extra["linear_scale_input_max"], 40.0)
+        self.assertEqual(upper_only.metadata.extra["linear_scale_input_min"], 0.0)
+        self.assertEqual(upper_only.metadata.extra["linear_scale_input_max"], 30.0)
+
+    def test_linear_scale_invalid_parameter_combinations(self) -> None:
+        invalid_params = [
+            {"min": 1, "perc": 0.1},
+            {"min": 1, "perc-down": 0.1},
+            {"max": 10, "perc": 0.1},
+            {"max": 10, "perc-up": 0.1},
+            {"perc": 0.1, "perc-down": 0.1},
+            {"perc": 0.1, "perc-up": 0.1},
+            {"perc": -0.1},
+            {"perc-up": 1.1},
+            {"perc_up": 0.1, "perc-up": 0.2},
+        ]
+        for params in invalid_params:
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                LinearScale("scale", params)
+
+        frame = np.array([[1, 2], [3, 4]], dtype=np.uint8)
+        with self.assertRaises(ValueError):
+            LinearScale("scale", {"omin": 5, "omax": 5}).process(
+                {"in": packet(frame, fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            LinearScale("scale", {"min": 10, "max": 1}).process(
+                {"in": packet(frame, fmt="gray")}
+            )
+
+    def test_linear_scale_three_channel_uses_global_range(self) -> None:
+        transform = LinearScale("scale", {})
+        frame = np.array(
+            [[[10, 20, 30], [40, 50, 60]], [[70, 80, 90], [100, 110, 210]]],
+            dtype=np.uint8,
+        )
+        result = transform.process({"in": packet(frame, fmt="rgb")})["out"][0]
+
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.metadata.channels, 3)
+        self.assertEqual(result.metadata.format, "rgb")
+        self.assertEqual(int(result.data[0, 0, 0]), 0)
+        self.assertEqual(int(result.data[0, 0, 1]), 13)
+        self.assertEqual(int(result.data.max()), 255)
+
     def test_combine_horizontal_preserves_both_parents(self) -> None:
         left = packet(np.zeros((4, 5, 3), dtype=np.uint8), stream_id="l")
         right = packet(np.ones((4, 6, 3), dtype=np.uint8), stream_id="r")
@@ -181,6 +306,14 @@ class PipelineTests(unittest.TestCase):
         ])
         self.assertEqual(len(spec.connections), 2)
 
+    def test_cli_parser_accepts_hyphenated_linear_scale_params(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mp4 ! linear-scale otype=uint8 perc-up=0.01 "
+            "! filesink path=out.mp4"
+        )
+        self.assertEqual(spec.elements[1].type, "linear-scale")
+        self.assertEqual(spec.elements[1].params["perc-up"], 0.01)
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -206,6 +339,23 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("params=[path, stream_id, source_id", output)
         self.assertIn("hist_equalize:", output)
         self.assertIn("params=[bins]", output)
+        self.assertIn("linear-scale:", output)
+        self.assertIn(
+            "params=[otype, omin, omax, min, max, perc, perc-down, perc-up]",
+            output,
+        )
+
+    def test_cli_describe_linear_scale_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "linear-scale"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: linear-scale", output)
+        self.assertIn("otype: str | optional", output)
+        self.assertIn("perc-up: float | optional", output)
+        self.assertIn("formats=[bgr, gray, rgb]", output)
 
     def test_cli_describe_shows_element_details(self) -> None:
         stdout = io.StringIO()
