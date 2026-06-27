@@ -23,7 +23,7 @@ def parse_pipeline_expression(expression: str) -> PipelineSpec:
     """Parse a compact CLI pipeline expression into a PipelineSpec.
 
     Supports simple linear chains and named graph references such as
-    ``ra.out ! combine.left name=c`` and ``rb.out ! c.right``.
+    ``ra.out ! combine.in0 name=c`` and ``rb.out ! c.in1``.
     """
     elements: list[ElementSpec] = []
     connections: list[ConnectionSpec] = []

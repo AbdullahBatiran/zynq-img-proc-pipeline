@@ -18,8 +18,8 @@ Run two sources, resize both, combine them horizontally, and display the result:
 zpipe run "
   filesrc name=a path=a.mp4 ! resize name=ra width=640 height=480
   filesrc name=b path=b.mp4 ! resize name=rb width=640 height=480
-  ra.out ! combine.left name=c mode=horizontal
-  rb.out ! c.right
+  ra.out ! combine.in0 name=c mode=horizontal
+  rb.out ! c.in1
   c.out ! displaysink window_name=combined fps=30
 "
 ```

@@ -15,8 +15,8 @@ spec = PipelineSpec(
     connections=[
         ConnectionSpec("src_a", "out", "resize_a", "in"),
         ConnectionSpec("src_b", "out", "resize_b", "in"),
-        ConnectionSpec("resize_a", "out", "combine", "left"),
-        ConnectionSpec("resize_b", "out", "combine", "right"),
+        ConnectionSpec("resize_a", "out", "combine", "in0"),
+        ConnectionSpec("resize_b", "out", "combine", "in1"),
         ConnectionSpec("combine", "out", "display", "in"),
     ],
 )

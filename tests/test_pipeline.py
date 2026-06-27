@@ -630,22 +630,140 @@ class PipelineTests(unittest.TestCase):
             with self.subTest(params=params), self.assertRaises(ValueError):
                 Debug("dbg", params)
 
-    def test_combine_horizontal_preserves_both_parents(self) -> None:
+    def test_combine_horizontal_three_inputs_preserves_parents(self) -> None:
         left = packet(np.zeros((4, 5, 3), dtype=np.uint8), stream_id="l")
-        right = packet(np.ones((4, 6, 3), dtype=np.uint8), stream_id="r")
+        middle = packet(np.ones((4, 6, 3), dtype=np.uint8), stream_id="m")
+        right = packet(np.full((4, 7, 3), 2, dtype=np.uint8), stream_id="r")
         transform = Combine("c", {"mode": "horizontal"})
-        result = transform.process({"left": left, "right": right})["out"][0]
-        self.assertEqual(result.metadata.width, 11)
+        result = transform.process({"in0": left, "in1": middle, "in2": right})["out"][0]
+        self.assertEqual(result.metadata.width, 18)
         self.assertEqual(result.metadata.height, 4)
         self.assertIn(left.metadata.packet_id, result.metadata.parents)
+        self.assertIn(middle.metadata.packet_id, result.metadata.parents)
         self.assertIn(right.metadata.packet_id, result.metadata.parents)
+        self.assertEqual(result.metadata.extra["input_ports"], ["in0", "in1", "in2"])
+
+    def test_combine_vertical_three_inputs(self) -> None:
+        top = packet(np.zeros((4, 5), dtype=np.uint8), stream_id="t", fmt="gray")
+        middle = packet(np.ones((6, 5), dtype=np.uint8), stream_id="m", fmt="gray")
+        bottom = packet(np.full((7, 5), 2, dtype=np.uint8), stream_id="b", fmt="gray")
+        transform = Combine("c", {"mode": "vertical"})
+        result = transform.process({"in0": top, "in1": middle, "in2": bottom})["out"][0]
+        self.assertEqual(result.data.shape, (17, 5))
+        self.assertEqual(result.metadata.width, 5)
+        self.assertEqual(result.metadata.height, 17)
+        self.assertEqual(result.metadata.extra["combine_mode"], "vertical")
+
+    def test_combine_grid_full_inputs(self) -> None:
+        frames = {
+            f"in{index}": packet(
+                np.full((2, 3), index, dtype=np.uint8),
+                stream_id=f"s{index}",
+                fmt="gray",
+            )
+            for index in range(4)
+        }
+        transform = Combine("c", {"mode": "grid", "rows": 2, "cols": 2})
+        result = transform.process(frames)["out"][0]
+
+        self.assertEqual(result.data.tolist(), [
+            [0, 0, 0, 1, 1, 1],
+            [0, 0, 0, 1, 1, 1],
+            [2, 2, 2, 3, 3, 3],
+            [2, 2, 2, 3, 3, 3],
+        ])
+        self.assertEqual(result.metadata.width, 6)
+        self.assertEqual(result.metadata.height, 4)
+        self.assertEqual(result.metadata.extra["grid_rows"], 2)
+        self.assertEqual(result.metadata.extra["grid_cols"], 2)
+        self.assertEqual(result.metadata.extra["missing_input_ports"], [])
+
+    def test_combine_grid_fills_unconnected_cells_black(self) -> None:
+        frames = {
+            "in0": packet(np.full((2, 2), 1, dtype=np.uint8), stream_id="a", fmt="gray"),
+            "in2": packet(np.full((2, 2), 2, dtype=np.uint8), stream_id="b", fmt="gray"),
+        }
+        transform = Combine("c", {"mode": "grid", "rows": 2, "cols": 2})
+        result = transform.process(frames)["out"][0]
+
+        self.assertEqual(result.data.tolist(), [
+            [1, 1, 0, 0],
+            [1, 1, 0, 0],
+            [2, 2, 0, 0],
+            [2, 2, 0, 0],
+        ])
+        self.assertEqual(result.metadata.extra["missing_input_ports"], ["in1", "in3"])
 
     def test_combine_rejects_depth_mismatch(self) -> None:
         left = packet(np.zeros((4, 5, 3), dtype=np.uint8))
         right = packet(np.zeros((4, 5, 3), dtype=np.uint16))
         transform = Combine("c", {"mode": "horizontal"})
         with self.assertRaises(ValueError):
-            transform.process({"left": left, "right": right})
+            transform.process({"in0": left, "in1": right})
+
+    def test_combine_rejects_incompatible_inputs(self) -> None:
+        base = packet(np.zeros((4, 5), dtype=np.uint8), fmt="gray")
+        cases = [
+            (
+                Combine("c", {"mode": "horizontal"}),
+                {
+                    "in0": base,
+                    "in1": packet(np.zeros((4, 5), dtype=np.uint8), fmt="bgr"),
+                },
+            ),
+            (
+                Combine("c", {"mode": "horizontal"}),
+                {
+                    "in0": base,
+                    "in1": packet(np.zeros((4, 5, 3), dtype=np.uint8), fmt="gray"),
+                },
+            ),
+            (
+                Combine("c", {"mode": "horizontal"}),
+                {
+                    "in0": base,
+                    "in1": packet(
+                        np.zeros((4, 5), dtype=np.uint8),
+                        fmt="gray",
+                        index=1,
+                    ),
+                },
+            ),
+            (
+                Combine("c", {"mode": "horizontal"}),
+                {
+                    "in0": base,
+                    "in1": packet(np.zeros((3, 5), dtype=np.uint8), fmt="gray"),
+                },
+            ),
+            (
+                Combine("c", {"mode": "vertical"}),
+                {
+                    "in0": base,
+                    "in1": packet(np.zeros((4, 6), dtype=np.uint8), fmt="gray"),
+                },
+            ),
+            (
+                Combine("c", {"mode": "grid", "rows": 1, "cols": 2}),
+                {
+                    "in0": base,
+                    "in1": packet(np.zeros((4, 6), dtype=np.uint8), fmt="gray"),
+                },
+            ),
+        ]
+        for transform, inputs in cases:
+            with self.subTest(mode=transform.mode), self.assertRaises(ValueError):
+                transform.process(inputs)
+
+    def test_combine_rejects_invalid_grid_configuration(self) -> None:
+        with self.assertRaises(ValueError):
+            Combine("c", {"mode": "grid"})
+        with self.assertRaises(ValueError):
+            Combine("c", {"mode": "overlay"})
+        with self.assertRaises(ValueError):
+            Combine("c", {"mode": "grid", "rows": 2, "cols": 2}).process(
+                {"in4": packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")}
+            )
 
     def test_cli_parser_linear(self) -> None:
         spec = parse_pipeline_expression(
@@ -712,14 +830,41 @@ class PipelineTests(unittest.TestCase):
             """
             filesrc name=a path=a.mp4 ! resize name=ra width=4 height=4
             filesrc name=b path=b.mp4 ! resize name=rb width=4 height=4
-            ra.out ! combine.left name=c mode=horizontal
-            rb.out ! c.right
+            ra.out ! combine.in0 name=c mode=horizontal
+            rb.out ! c.in1
             c.out ! filesink path=out.mp4
             """
         )
         ids = {element.id for element in spec.elements}
         self.assertTrue({"a", "b", "ra", "rb", "c", "filesink"}.issubset(ids))
-        self.assertIn(ConnectionSpec("rb", "out", "c", "right"), spec.connections)
+        self.assertIn(ConnectionSpec("rb", "out", "c", "in1"), spec.connections)
+
+    def test_pipeline_validation_accepts_dynamic_combine_ports(self) -> None:
+        spec = PipelineSpec(
+            elements=[
+                ElementSpec("src_a", "filesrc", {"path": "a.mp4"}),
+                ElementSpec("src_b", "filesrc", {"path": "b.mp4"}),
+                ElementSpec("combo", "combine", {"mode": "horizontal"}),
+                ElementSpec("out", "filesink", {"path": "out.mp4"}),
+            ],
+            connections=[
+                ConnectionSpec("src_a", "out", "combo", "in0"),
+                ConnectionSpec("src_b", "out", "combo", "in1"),
+                ConnectionSpec("combo", "out", "out", "in"),
+            ],
+        )
+        Pipeline.from_spec(spec)
+
+    def test_pipeline_validation_rejects_invalid_dynamic_combine_port(self) -> None:
+        spec = PipelineSpec(
+            elements=[
+                ElementSpec("src_a", "filesrc", {"path": "a.mp4"}),
+                ElementSpec("combo", "combine", {"mode": "horizontal"}),
+            ],
+            connections=[ConnectionSpec("src_a", "out", "combo", "foo")],
+        )
+        with self.assertRaises(ValueError):
+            Pipeline.from_spec(spec)
 
     def test_cli_run_loads_pipeline_script_with_placeholders(self) -> None:
         class DummyPipeline:
@@ -865,6 +1010,22 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("every-seconds: float | optional", output)
         self.assertIn("show-preview: bool | optional", output)
         self.assertIn("preview-mode: str | optional", output)
+
+    def test_cli_describe_combine_shows_dynamic_inputs(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "combine"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: combine", output)
+        self.assertIn("inN: FramePacket", output)
+        self.assertIn("mode: str | optional", output)
+        self.assertIn("choices=[grid, horizontal, vertical]", output)
+        self.assertIn("rows: int | optional", output)
+        self.assertIn("cols: int | optional", output)
+        self.assertNotIn("overlay", output)
+        self.assertNotIn("alpha", output)
 
     def test_cli_describe_filter_elements(self) -> None:
         expectations = {

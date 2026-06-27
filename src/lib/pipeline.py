@@ -92,14 +92,15 @@ class Pipeline:
                     f"Element {connection.from_element!r} has no output port "
                     f"{connection.from_port!r}"
                 )
-            if connection.to_port not in target_contract.input_ports:
+            target_port = target_contract.input_contract(connection.to_port)
+            if target_port is None:
                 raise ValueError(
                     f"Element {connection.to_element!r} has no input port "
                     f"{connection.to_port!r}"
                 )
 
             out_port = source_contract.output_ports[connection.from_port]
-            in_port = target_contract.input_ports[connection.to_port]
+            in_port = target_port
             if in_port.formats is not None and out_port.formats is not None:
                 if not in_port.formats.intersection(out_port.formats):
                     raise ValueError(
@@ -194,9 +195,12 @@ class Pipeline:
         return progressed
 
     def _required_input_ports(self, element_id: str, element: Element) -> set[str]:
-        contract_ports = element.contract().input_names()
+        contract = element.contract()
+        contract_ports = contract.input_names()
         connected_ports = self.incoming_ports.get(element_id, set())
-        return contract_ports.intersection(connected_ports) or contract_ports
+        dynamic_ports = contract.dynamic_input_names(connected_ports)
+        required_static_ports = contract_ports.intersection(connected_ports)
+        return required_static_ports | dynamic_ports or contract_ports
 
     def _validate_inputs(
         self, element: Element, inputs: dict[str, FramePacket]
@@ -205,7 +209,10 @@ class Pipeline:
         packets = list(inputs.values())
         validate_packets_are_frame_packets(packets)
         for port_name, packet in inputs.items():
-            contract.input_ports[port_name].validate_packet(packet)
+            port_contract = contract.input_contract(port_name)
+            if port_contract is None:
+                raise ValueError(f"{element.instance_id} has no input port {port_name!r}")
+            port_contract.validate_packet(packet)
 
         if len(packets) < 2:
             return

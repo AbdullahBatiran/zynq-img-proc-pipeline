@@ -155,7 +155,7 @@ def _format_element_description(name: str, contract: ElementContract) -> str:
         lines.append("  none")
 
     lines.extend(["", "Input ports:"])
-    lines.extend(_format_ports(contract.input_ports))
+    lines.extend(_format_input_ports(contract))
     lines.extend(["", "Output ports:"])
     lines.extend(_format_ports(contract.output_ports))
 
@@ -192,6 +192,21 @@ def _format_ports(ports: dict[str, PortContract]) -> list[str]:
         suffix = f" | {'; '.join(constraints)}" if constraints else ""
         lines.append(f"  {port.name}: {port.packet_type.__name__}{suffix}")
     return lines
+
+
+def _format_input_ports(contract: ElementContract) -> list[str]:
+    lines = _format_ports(contract.input_ports) if contract.input_ports else []
+    for prefix, port in contract.dynamic_input_ports.items():
+        constraints: list[str] = []
+        if port.formats is not None:
+            constraints.append(f"formats=[{', '.join(sorted(port.formats))}]")
+        if port.depths is not None:
+            constraints.append(
+                f"depths=[{', '.join(str(depth) for depth in sorted(port.depths))}]"
+            )
+        suffix = f" | {'; '.join(constraints)}" if constraints else ""
+        lines.append(f"  {prefix}N: {port.packet_type.__name__}{suffix}")
+    return lines or ["  none"]
 
 
 def _format_rules(contract: ElementContract) -> list[str]:
