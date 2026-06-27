@@ -6,10 +6,12 @@ import argparse
 import re
 import shlex
 import sys
+import textwrap
 from pathlib import Path
 
 from src.lib.cli_parse import parse_pipeline_expression
 from src.lib.contracts import ElementContract, ParameterContract, PortContract
+from src.lib.elements import Element, Sink, Source, Transformer
 from src.lib.opencv_qt import configure_opencv_qt_environment
 from src.lib.pipeline import Pipeline
 from src.lib.registry import default_registry, register_builtin_elements
@@ -60,12 +62,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "list-elements":
-        for name, element_cls in default_registry.items():
-            contract = element_cls.contract()
-            if args.verbose:
-                print(_format_verbose_element(name, contract))
-            else:
-                print(f"{name}: {contract.description}")
+        print(_format_element_list(default_registry.items(), verbose=args.verbose))
         return 0
     if args.command == "describe":
         try:
@@ -136,9 +133,91 @@ def _substitute_placeholders(expression: str, args: list[str]) -> str:
     return re.sub(r"\$(\d+)", replace, expression)
 
 
-def _format_verbose_element(name: str, contract: ElementContract) -> str:
-    parameters = ", ".join(contract.parameters) if contract.parameters else "none"
-    return f"{name}: {contract.description} params=[{parameters}]"
+def _format_element_list(
+    elements: list[tuple[str, type[Element]]], *, verbose: bool
+) -> str:
+    lines = [f"Registered elements ({len(elements)})"]
+    for group_name, group_elements in _group_elements(elements):
+        if not group_elements:
+            continue
+        lines.extend(["", group_name])
+        if verbose:
+            for name, element_cls in group_elements:
+                lines.extend(_format_verbose_element(name, element_cls.contract()))
+        else:
+            name_width = max(len("Name"), *(len(name) for name, _ in group_elements))
+            lines.append(f"  {'Name'.ljust(name_width)}  Description")
+            lines.append(f"  {'-' * name_width}  -----------")
+            for name, element_cls in group_elements:
+                description = element_cls.contract().description or "(none)"
+                lines.append(f"  {name.ljust(name_width)}  {description}")
+    return "\n".join(lines)
+
+
+def _group_elements(
+    elements: list[tuple[str, type[Element]]],
+) -> list[tuple[str, list[tuple[str, type[Element]]]]]:
+    return [
+        ("Sources", _elements_of_type(elements, Source)),
+        ("Transformers", _elements_of_type(elements, Transformer)),
+        ("Sinks", _elements_of_type(elements, Sink)),
+        (
+            "Other",
+            [
+                item
+                for item in elements
+                if not issubclass(item[1], (Source, Transformer, Sink))
+            ],
+        ),
+    ]
+
+
+def _elements_of_type(
+    elements: list[tuple[str, type[Element]]], element_type: type[Element]
+) -> list[tuple[str, type[Element]]]:
+    return [item for item in elements if issubclass(item[1], element_type)]
+
+
+def _format_verbose_element(name: str, contract: ElementContract) -> list[str]:
+    lines = [f"  {name}"]
+    lines.extend(_format_wrapped_field("Description", contract.description or "(none)"))
+    lines.extend(_format_wrapped_field("Inputs", ", ".join(_input_names(contract))))
+    lines.extend(
+        _format_wrapped_field("Outputs", ", ".join(contract.output_ports) or "none")
+    )
+    lines.extend(
+        _format_wrapped_field(
+            "Parameters",
+            ", ".join(_parameter_names(contract)) or "none",
+        )
+    )
+    if any(parameter.required for parameter in contract.parameters.values()):
+        lines.append("    * required")
+    return lines
+
+
+def _input_names(contract: ElementContract) -> list[str]:
+    names = list(contract.input_ports)
+    names.extend(f"{prefix}N" for prefix in contract.dynamic_input_ports)
+    return names or ["none"]
+
+
+def _parameter_names(contract: ElementContract) -> list[str]:
+    return [
+        f"{name}*" if parameter.required else name
+        for name, parameter in contract.parameters.items()
+    ]
+
+
+def _format_wrapped_field(label: str, value: str) -> list[str]:
+    prefix = f"    {label}: "
+    return textwrap.wrap(
+        value,
+        width=88,
+        initial_indent=prefix,
+        subsequent_indent=" " * len(prefix),
+        break_on_hyphens=False,
+    )
 
 
 def _format_element_description(name: str, contract: ElementContract) -> str:

@@ -943,37 +943,59 @@ class PipelineTests(unittest.TestCase):
                 stderr.getvalue(),
             )
 
-    def test_cli_list_elements_verbose_shows_parameter_names(self) -> None:
+    def test_cli_list_elements_groups_registered_elements(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["list-elements"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Registered elements (", output)
+        self.assertIn("Sources", output)
+        self.assertIn("Transformers", output)
+        self.assertIn("Sinks", output)
+        self.assertIn("filesrc  Read video frames from a file with OpenCV.", output)
+        self.assertIn("combine", output)
+        self.assertIn("linear-scale", output)
+        self.assertIn("displaysink", output)
+
+    def test_cli_list_elements_verbose_shows_readable_element_blocks(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             exit_code = cli_main(["list-elements", "--verbose"])
 
         output = stdout.getvalue()
         self.assertEqual(exit_code, 0)
-        self.assertIn("bilateral:", output)
-        self.assertIn("params=[diameter, sigma-color, sigma-space]", output)
-        self.assertIn("filesrc:", output)
-        self.assertIn("params=[path, stream_id, source_id", output)
-        self.assertIn("gaussian:", output)
-        self.assertIn("params=[kernel-size, sigma-x, sigma-y]", output)
-        self.assertIn("debug:", output)
-        self.assertIn("params=[enabled, every-seconds, every-frames", output)
-        self.assertIn("hist_equalize:", output)
-        self.assertIn("params=[bins, output-bits, output-max]", output)
-        self.assertIn("laplacian-sharp:", output)
+        self.assertIn("Registered elements (", output)
+        self.assertIn("Sources\n  filesrc", output)
+        self.assertIn("Inputs: none", output)
         self.assertIn(
-            "params=[amount, kernel-size, iterations, mode, scale, delta]",
+            "Parameters: path*, stream_id, source_id, format, depth, preserve_native",
             output,
         )
-        self.assertIn("linear-scale:", output)
+        self.assertIn("* required", output)
+        self.assertIn("Transformers\n  bilateral", output)
+        self.assertIn("Parameters: diameter, sigma-color, sigma-space", output)
+        self.assertIn("  combine", output)
+        self.assertIn("Inputs: inN", output)
+        self.assertIn("Parameters: mode, rows, cols, stream_id", output)
+        self.assertIn("  debug", output)
+        self.assertIn("every-seconds, every-frames", output)
+        self.assertIn("show-preview", output)
+        self.assertIn("  gaussian", output)
+        self.assertIn("Parameters: kernel-size, sigma-x, sigma-y", output)
+        self.assertIn("  hist_equalize", output)
+        self.assertIn("Parameters: bins, output-bits, output-max", output)
+        self.assertIn("  laplacian-sharp", output)
         self.assertIn(
-            "params=[otype, omin, omax, min, max, perc, perc-down, perc-up]",
+            "Parameters: amount, kernel-size, iterations, mode, scale, delta",
             output,
         )
-        self.assertIn("median:", output)
-        self.assertIn("params=[kernel-size]", output)
-        self.assertIn("unsharp:", output)
-        self.assertIn("params=[amount, sigma, kernel-size]", output)
+        self.assertIn("  linear-scale", output)
+        self.assertIn("otype, omin, omax, min, max, perc, perc-down, perc-up", output)
+        self.assertIn("  median", output)
+        self.assertIn("  unsharp", output)
+        self.assertIn("Sinks\n  displaysink", output)
 
     def test_cli_describe_linear_scale_shows_element_details(self) -> None:
         stdout = io.StringIO()
