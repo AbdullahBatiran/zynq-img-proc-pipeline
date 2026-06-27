@@ -7,7 +7,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.lib.contracts import ElementContract, PortContract
+from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, Transformer
 from src.lib.packets import FrameMetadata, FramePacket, infer_frame_shape, new_packet_id
 
@@ -22,6 +22,27 @@ class Combine(Transformer):
         return ElementContract(
             input_ports={"left": PortContract("left"), "right": PortContract("right")},
             output_ports={"out": PortContract("out")},
+            parameters={
+                "mode": ParameterContract(
+                    "mode",
+                    "str",
+                    default="horizontal",
+                    choices=("horizontal", "vertical", "overlay"),
+                    description="How to combine left and right frames.",
+                ),
+                "alpha": ParameterContract(
+                    "alpha",
+                    "float",
+                    default=0.5,
+                    description="Left-frame opacity for overlay mode.",
+                ),
+                "stream_id": ParameterContract(
+                    "stream_id",
+                    "str",
+                    default="<left stream id>+<right stream id>",
+                    description="Output stream id override.",
+                ),
+            },
             description="Combine two streams horizontally, vertically, or by overlay.",
             require_same_format=True,
             require_same_depth=True,

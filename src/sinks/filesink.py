@@ -7,7 +7,7 @@ from typing import Any
 
 import cv2
 
-from src.lib.contracts import ElementContract, PortContract
+from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, PipelineContext, Sink
 
 
@@ -20,6 +20,23 @@ class FileSink(Sink):
     def contract(cls) -> ElementContract:
         return ElementContract(
             input_ports={"in": PortContract("in")},
+            parameters={
+                "path": ParameterContract(
+                    "path", "path", required=True, description="Output video path."
+                ),
+                "codec": ParameterContract(
+                    "codec",
+                    "str",
+                    default="mp4v",
+                    description="FourCC codec used by OpenCV VideoWriter.",
+                ),
+                "fps": ParameterContract(
+                    "fps",
+                    "float",
+                    default="<input metadata fps or 30>",
+                    description="Output FPS override.",
+                ),
+            },
             description="Write video frames to a file with OpenCV.",
         )
 

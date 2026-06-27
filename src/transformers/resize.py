@@ -6,7 +6,7 @@ from typing import Any
 
 import cv2
 
-from src.lib.contracts import ElementContract, PortContract
+from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, Transformer
 from src.lib.packets import FramePacket, infer_frame_shape
 
@@ -30,6 +30,21 @@ class Resize(Transformer):
         return ElementContract(
             input_ports={"in": PortContract("in")},
             output_ports={"out": PortContract("out")},
+            parameters={
+                "width": ParameterContract(
+                    "width", "int", required=True, description="Output frame width."
+                ),
+                "height": ParameterContract(
+                    "height", "int", required=True, description="Output frame height."
+                ),
+                "interpolation": ParameterContract(
+                    "interpolation",
+                    "str",
+                    default="linear",
+                    choices=tuple(_INTERPOLATION),
+                    description="OpenCV resize interpolation mode.",
+                ),
+            },
             description="Resize video frames.",
         )
 

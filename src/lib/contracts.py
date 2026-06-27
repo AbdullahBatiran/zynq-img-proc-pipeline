@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 from .packets import FramePacket
 
@@ -51,9 +51,20 @@ class PortContract:
 
 
 @dataclass(frozen=True)
+class ParameterContract:
+    name: str
+    type_name: str
+    required: bool = False
+    default: Any = None
+    choices: tuple[Any, ...] = ()
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class ElementContract:
     input_ports: dict[str, PortContract] = field(default_factory=dict)
     output_ports: dict[str, PortContract] = field(default_factory=dict)
+    parameters: dict[str, ParameterContract] = field(default_factory=dict)
     description: str = ""
     require_same_size: bool = False
     require_same_format: bool = False

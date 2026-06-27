@@ -6,7 +6,7 @@ from typing import Any
 
 import cv2
 
-from src.lib.contracts import ElementContract, PortContract
+from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, PipelineContext, Sink
 
 
@@ -19,6 +19,44 @@ class DisplaySink(Sink):
     def contract(cls) -> ElementContract:
         return ElementContract(
             input_ports={"in": PortContract("in")},
+            parameters={
+                "window_name": ParameterContract(
+                    "window_name",
+                    "str",
+                    default="<element id>",
+                    description="OpenCV display window name.",
+                ),
+                "wait_ms": ParameterContract(
+                    "wait_ms",
+                    "int",
+                    default="<derived from fps when sync=true>",
+                    description="Fixed cv2.waitKey delay in milliseconds.",
+                ),
+                "fps": ParameterContract(
+                    "fps",
+                    "float",
+                    default="<input metadata fps>",
+                    description="Playback FPS override when sync is enabled.",
+                ),
+                "sync": ParameterContract(
+                    "sync",
+                    "bool",
+                    default=True,
+                    description="Use FPS to pace display instead of running as fast as possible.",
+                ),
+                "enabled": ParameterContract(
+                    "enabled",
+                    "bool",
+                    default=True,
+                    description="Disable OpenCV display calls for tests/headless runs.",
+                ),
+                "quit_key": ParameterContract(
+                    "quit_key",
+                    "str",
+                    default="q",
+                    description="Keyboard key that requests pipeline stop.",
+                ),
+            },
             description="Display video frames in an OpenCV window.",
         )
 

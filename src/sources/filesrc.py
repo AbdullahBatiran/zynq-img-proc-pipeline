@@ -7,7 +7,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.lib.contracts import ElementContract, PortContract
+from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, PipelineContext, Source
 from src.lib.packets import FrameMetadata, FramePacket, infer_frame_shape, new_packet_id
 
@@ -24,6 +24,49 @@ class FileSource(Source):
     def contract(cls) -> ElementContract:
         return ElementContract(
             output_ports={"out": PortContract("out")},
+            parameters={
+                "path": ParameterContract(
+                    "path", "path", required=True, description="Video file path."
+                ),
+                "stream_id": ParameterContract(
+                    "stream_id",
+                    "str",
+                    default="<element id>",
+                    description="Logical stream id assigned to emitted frames.",
+                ),
+                "source_id": ParameterContract(
+                    "source_id",
+                    "str",
+                    default="<element id>",
+                    description="Source id stored in frame metadata.",
+                ),
+                "format": ParameterContract(
+                    "format",
+                    "str",
+                    default="bgr",
+                    choices=("auto", "gray", "bgr", "rgb"),
+                    description="Requested output pixel format.",
+                ),
+                "depth": ParameterContract(
+                    "depth",
+                    "int|str",
+                    default="auto",
+                    choices=("auto", 8, 16),
+                    description="Requested decoded bit depth.",
+                ),
+                "preserve_native": ParameterContract(
+                    "preserve_native",
+                    "bool",
+                    default=False,
+                    description="Ask OpenCV not to convert decoded frames to RGB/BGR.",
+                ),
+                "strict": ParameterContract(
+                    "strict",
+                    "bool",
+                    default="<true if format/depth requested, else false>",
+                    description="Reject decoded frames that do not match requested format/depth.",
+                ),
+            },
             description="Read video frames from a file with OpenCV.",
         )
 

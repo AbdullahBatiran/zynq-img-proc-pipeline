@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from src.lib.contracts import ElementContract, PortContract
+from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, Transformer
 from src.lib.packets import FramePacket, infer_frame_shape
 
@@ -25,6 +25,14 @@ class HistEqualize(Transformer):
                 )
             },
             output_ports={"out": PortContract("out", depths={8, 16})},
+            parameters={
+                "bins": ParameterContract(
+                    "bins",
+                    "int",
+                    default="<256 for 8-bit, 65536 for 16-bit>",
+                    description="Histogram bin count used for CDF equalization.",
+                )
+            },
             description="Apply normal histogram equalization.",
         )
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +10,7 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
+from src.cli import main as cli_main
 from src.lib.cli_parse import parse_pipeline_expression
 from src.lib.elements import PipelineContext
 from src.lib.packets import FrameMetadata, FramePacket, new_packet_id
@@ -191,6 +194,39 @@ class PipelineTests(unittest.TestCase):
         ids = {element.id for element in spec.elements}
         self.assertTrue({"a", "b", "ra", "rb", "c", "filesink"}.issubset(ids))
         self.assertIn(ConnectionSpec("rb", "out", "c", "right"), spec.connections)
+
+    def test_cli_list_elements_verbose_shows_parameter_names(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["list-elements", "--verbose"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("filesrc:", output)
+        self.assertIn("params=[path, stream_id, source_id", output)
+        self.assertIn("hist_equalize:", output)
+        self.assertIn("params=[bins]", output)
+
+    def test_cli_describe_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "filesrc"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: filesrc", output)
+        self.assertIn("Parameters:", output)
+        self.assertIn("path: path | required", output)
+        self.assertIn("format: str | optional", output)
+        self.assertIn("Output ports:", output)
+
+    def test_cli_describe_unknown_element_returns_error(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            exit_code = cli_main(["describe", "missing"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Unknown element 'missing'", stderr.getvalue())
 
     def test_displaysink_uses_explicit_or_metadata_fps(self) -> None:
         frame = packet(np.zeros((4, 5, 3), dtype=np.uint8))
