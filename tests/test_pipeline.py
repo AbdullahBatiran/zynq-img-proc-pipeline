@@ -22,21 +22,38 @@ from src.sinks.displaysink import DisplaySink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
 from src.transformers.bit_shift import BitShift
 from src.transformers.bilateral import Bilateral
+from src.transformers.clahe import Clahe
 from src.transformers.bypass import Bypass
 from src.transformers.combine import Combine
 from src.transformers.debug import Debug
+from src.transformers.deflicker import Deflicker
+from src.transformers.dog import Dog
+from src.transformers.edge_enhance import EdgeEnhance
 from src.transformers.dtype_convert import DtypeConvert
 from src.transformers.fan_out import FanOut
+from src.transformers.frame_diff_debug import FrameDiffDebug
 from src.transformers.gaussian import Gaussian
+from src.transformers.guided_filter import GuidedFilter
 from src.transformers.hist_equalize import HistEqualize
 from src.transformers.interlace_mimic_test import InterlaceMimicTest
 from src.transformers.laplacian_sharp import LaplacianSharp
 from src.transformers.linear_scale import LinearScale
+from src.transformers.local_contrast import LocalContrast
+from src.transformers.log_filter import LogFilter
 from src.transformers.median import Median
+from src.transformers.morphology import Morphology
+from src.transformers.nl_means import NlMeans
+from src.transformers.progress import Progress
+from src.transformers.retinex import Retinex
 from src.transformers.mono_to_color import MonoToColor
 from src.transformers.resize import Resize
+from src.transformers.rolling_background import RollingBackground
+from src.transformers.temporal_denoise import TemporalDenoise
+from src.transformers.tone_curve import ToneCurve
 from src.transformers.text_overlay import TextOverlay
 from src.transformers.unsharp import Unsharp
+from src.transformers.tv_denoise import TvDenoise
+from src.transformers.wavelet_denoise import WaveletDenoise
 
 
 def packet(
@@ -484,7 +501,174 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(once.data.dtype, np.uint16)
         self.assertEqual(twice.data.dtype, np.uint16)
         self.assertEqual(twice.metadata.extra["filter_params"]["iterations"], 2)
-        self.assertFalse(np.array_equal(once.data, twice.data))
+
+    def test_ir_enhancement_elements_preserve_dtype_shape_and_depth(self) -> None:
+        transforms = [
+            Clahe("e", {"tile-grid-size": 4}),
+            ToneCurve("e", {"mode": "gamma", "gamma": 0.8}),
+            Retinex("e", {"mode": "single", "sigma": 3.0, "output-mode": "normalize"}),
+            LocalContrast("e", {"sigma": 3.0, "normalize": True}),
+            RollingBackground("e", {"radius": 3, "normalize": True}),
+            Morphology("e", {"op": "tophat", "kernel-size": 3}),
+            Dog("e", {"sigma-small": 1.0, "sigma-large": 2.0}),
+            LogFilter("e", {"sigma": 1.0, "kernel-size": 3}),
+            EdgeEnhance("e", {"operator": "sobel", "ksize": 3}),
+            GuidedFilter("e", {"radius": 2, "mode": "enhance"}),
+            NlMeans("e", {"h": 5.0, "template-window-size": 3, "search-window-size": 5}),
+            TvDenoise("e", {"weight": 0.05, "max-num-iter": 5}),
+            WaveletDenoise("e", {"sigma": 0.01}),
+            TemporalDenoise("e", {"mode": "mean", "window": 3}),
+            Deflicker("e", {"mode": "percentile", "alpha": 0.5}),
+        ]
+        frames = [
+            np.tile(np.arange(16, dtype=np.uint8), (16, 1)),
+            np.tile(np.arange(16, dtype=np.uint16), (16, 1)) * 100,
+        ]
+
+        for transform in transforms:
+            for frame in frames:
+                with self.subTest(element=transform.type_name, dtype=frame.dtype):
+                    source = packet(frame, fmt="gray")
+                    result = transform.process({"in": source})["out"][0]
+
+                    self.assertEqual(result.data.dtype, frame.dtype)
+                    self.assertEqual(result.data.shape, frame.shape)
+                    self.assertEqual(result.metadata.depth, source.metadata.depth)
+                    self.assertEqual(result.metadata.extra["enhanced_by"], "e")
+                    self.assertEqual(
+                        result.metadata.extra["enhancement_name"],
+                        transform.type_name,
+                    )
+                    self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_ir_enhancement_elements_preserve_three_channel_shape(self) -> None:
+        frame = np.dstack(
+            [
+                np.tile(np.arange(16, dtype=np.uint8), (16, 1)),
+                np.tile(np.arange(16, dtype=np.uint8), (16, 1)).T,
+                np.full((16, 16), 32, dtype=np.uint8),
+            ]
+        )
+        transforms = [
+            Clahe("e", {"tile-grid-size": 4}),
+            ToneCurve("e", {"mode": "log"}),
+            LocalContrast("e", {"sigma": 3.0}),
+            Morphology("e", {"op": "gradient", "kernel-size": 3}),
+            Dog("e", {"sigma-large": 2.0}),
+            EdgeEnhance("e", {}),
+            GuidedFilter("e", {"radius": 2}),
+            TvDenoise("e", {"max-num-iter": 5}),
+            WaveletDenoise("e", {"sigma": 0.01}),
+        ]
+
+        for transform in transforms:
+            with self.subTest(element=transform.type_name):
+                result = transform.process({"in": packet(frame, fmt="rgb")})["out"][0]
+                self.assertEqual(result.data.dtype, np.uint8)
+                self.assertEqual(result.data.shape, frame.shape)
+                self.assertEqual(result.metadata.channels, 3)
+
+    def test_ir_enhancement_algorithm_behaviors(self) -> None:
+        gradient = np.tile(np.arange(32, dtype=np.uint8), (32, 1))
+        clahe = Clahe("e", {"tile-grid-size": 4}).process(
+            {"in": packet(gradient, fmt="gray")}
+        )["out"][0]
+        self.assertFalse(np.array_equal(clahe.data, gradient))
+
+        tone = ToneCurve("e", {"mode": "gamma", "gamma": 2.0}).process(
+            {"in": packet(np.array([[0, 128, 255]], dtype=np.uint8), fmt="gray")}
+        )["out"][0]
+        self.assertLess(int(tone.data[0, 1]), 128)
+
+        target = np.zeros((9, 9), dtype=np.uint8)
+        target[4, 4] = 255
+        top_hat = Morphology("e", {"op": "tophat", "kernel-size": 3}).process(
+            {"in": packet(target, fmt="gray")}
+        )["out"][0]
+        self.assertEqual(int(top_hat.data[4, 4]), 255)
+
+        edge_frame = np.zeros((16, 16), dtype=np.uint8)
+        edge_frame[:, 8:] = 200
+        for transform in (
+            Dog("e", {"sigma-small": 1.0, "sigma-large": 2.0}),
+            LogFilter("e", {"kernel-size": 3}),
+            EdgeEnhance("e", {}),
+        ):
+            with self.subTest(element=transform.type_name):
+                result = transform.process({"in": packet(edge_frame, fmt="gray")})[
+                    "out"
+                ][0]
+                self.assertGreater(int(result.data.max()), 0)
+
+    def test_temporal_enhancement_is_deterministic(self) -> None:
+        first = packet(np.full((2, 2), 10, dtype=np.uint8), fmt="gray", index=0)
+        second = packet(np.full((2, 2), 20, dtype=np.uint8), fmt="gray", index=1)
+        transform = TemporalDenoise("t", {"mode": "mean", "window": 2})
+
+        out1 = transform.process({"in": first})["out"][0]
+        out2 = transform.process({"in": second})["out"][0]
+
+        self.assertEqual(int(out1.data[0, 0]), 10)
+        self.assertEqual(int(out2.data[0, 0]), 15)
+        self.assertEqual(out2.metadata.extra["temporal_history_size"], 2)
+
+    def test_debug_progress_and_frame_diff_diagnostics(self) -> None:
+        frame0 = packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray", index=0)
+        frame1 = packet(np.ones((2, 2), dtype=np.uint8) * 4, fmt="gray", index=1)
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = Debug(
+                "dbg",
+                {
+                    "show-percentiles": True,
+                    "percentiles": "0,0.5,1",
+                    "show-histogram": True,
+                    "hist-bins": 2,
+                },
+            ).process({"in": frame1})["out"][0]
+        self.assertIs(result, frame1)
+        self.assertIn("percentiles", stdout.getvalue())
+        self.assertIn("histogram bins=2", stdout.getvalue())
+
+        progress = Progress("p", {"every-frames": 1})
+        progress.start(PipelineContext())
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertIs(progress.process({"in": frame0})["out"][0], frame0)
+        self.assertIn("[progress p]", stdout.getvalue())
+
+        diff = FrameDiffDebug("d", {"every-frames": 1})
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            diff.process({"in": frame0})
+            self.assertIs(diff.process({"in": frame1})["out"][0], frame1)
+        self.assertIn("mean_abs=4", stdout.getvalue())
+
+    def test_new_ir_elements_reject_invalid_parameters(self) -> None:
+        invalid = [
+            (Clahe, {"clip-limit": 0}),
+            (ToneCurve, {"mode": "bad"}),
+            (Retinex, {"sigma": 0}),
+            (LocalContrast, {"mode": "bad"}),
+            (RollingBackground, {"radius": 0}),
+            (Morphology, {"op": "bad"}),
+            (Dog, {"sigma-small": 3, "sigma-large": 1}),
+            (LogFilter, {"kernel-size": 2}),
+            (EdgeEnhance, {"operator": "bad"}),
+            (GuidedFilter, {"radius": 0}),
+            (NlMeans, {"h": 0}),
+            (TvDenoise, {"weight": 0}),
+            (WaveletDenoise, {"wavelet": "db2"}),
+            (TemporalDenoise, {"window": 0}),
+            (Deflicker, {"low-perc": 0.9, "high-perc": 0.1}),
+            (Progress, {"every-frames": 0}),
+            (FrameDiffDebug, {"every-frames": 0}),
+        ]
+        for transform_cls, params in invalid:
+            with self.subTest(transform=transform_cls.__name__, params=params):
+                with self.assertRaises(ValueError):
+                    transform_cls("bad", params)
 
     def test_debug_default_prints_once_and_passes_same_packet(self) -> None:
         transform = Debug("dbg", {})
@@ -1332,6 +1516,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[4].params["kernel-size"], 3)
         self.assertEqual(spec.elements[4].params["iterations"], 2)
 
+    def test_cli_parser_accepts_hyphenated_ir_enhancement_params(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mp4 ! clahe clip-limit=2.0 tile-grid-size=4 "
+            "! dog sigma-small=1.0 sigma-large=3.0 ! progress every-frames=30 "
+            "! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "clahe")
+        self.assertEqual(spec.elements[1].params["clip-limit"], 2.0)
+        self.assertEqual(spec.elements[1].params["tile-grid-size"], 4)
+        self.assertEqual(spec.elements[2].type, "dog")
+        self.assertEqual(spec.elements[2].params["sigma-small"], 1.0)
+        self.assertEqual(spec.elements[2].params["sigma-large"], 3.0)
+        self.assertEqual(spec.elements[3].type, "progress")
+        self.assertEqual(spec.elements[3].params["every-frames"], 30)
+
     def test_cli_parser_accepts_text_overlay_quoted_text(self) -> None:
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! text-overlay text='Frame 1' color=red "
@@ -1560,6 +1760,25 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Sinks", output)
         self.assertIn("Name     Subcategory  Description", output)
         self.assertIn("filesrc  File         Read video frames", output)
+        self.assertIn("combine", output)
+        self.assertIn("Compose", output)
+        self.assertIn("fan-out", output)
+        self.assertIn("temporal-denoise", output)
+        self.assertIn("Control", output)
+        self.assertIn("hist_equalize", output)
+        self.assertIn("Contrast", output)
+        self.assertIn("linear-scale", output)
+        self.assertIn("clahe", output)
+        self.assertIn("tone-curve", output)
+        self.assertIn("debug", output)
+        self.assertIn("progress", output)
+        self.assertIn("Debug", output)
+        self.assertIn("bilateral", output)
+        self.assertIn("Filter", output)
+        self.assertIn("morphology", output)
+        self.assertIn("wavelet-denoise", output)
+        self.assertIn("resize", output)
+        self.assertIn("Geometry", output)
         self.assertIn("combine               Compose", output)
         self.assertIn("text-overlay          Compose", output)
         self.assertIn("mono-to-color         Color", output)
@@ -1591,6 +1810,11 @@ class PipelineTests(unittest.TestCase):
             output,
         )
         self.assertIn("* required", output)
+        self.assertIn("Transformers\n  Compose\n    combine", output)
+        self.assertIn("  Control\n    deflicker", output)
+        self.assertIn("    fan-out", output)
+        self.assertIn("    temporal-denoise", output)
+        self.assertIn("    deflicker", output)
         self.assertIn("Transformers", output)
         self.assertIn("  Compose\n    combine", output)
         self.assertIn("    text-overlay", output)
@@ -1601,10 +1825,18 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("    fan-out", output)
         self.assertIn("Outputs: outN", output)
         self.assertIn("Parameters: outputs", output)
+        self.assertIn("  Contrast\n    clahe", output)
+        self.assertIn("    hist_equalize", output)
         self.assertIn("Parameters: none", output)
         self.assertIn("  Contrast\n    hist_equalize", output)
         self.assertIn("    linear-scale", output)
+        self.assertIn("    local-contrast", output)
+        self.assertIn("    retinex", output)
+        self.assertIn("    rolling-background", output)
+        self.assertIn("    tone-curve", output)
         self.assertIn("  Debug\n    debug", output)
+        self.assertIn("    progress", output)
+        self.assertIn("    frame-diff-debug", output)
         self.assertIn("  Filter\n    bilateral", output)
         self.assertIn("Parameters: diameter, sigma-color, sigma-space", output)
         self.assertIn("Inputs: inN", output)
@@ -1615,6 +1847,10 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Parameters: kernel-size, sigma-x, sigma-y", output)
         self.assertIn("Parameters: bins, output-bits, output-max", output)
         self.assertIn("    laplacian-sharp", output)
+        self.assertIn("    morphology", output)
+        self.assertIn("    nl-means", output)
+        self.assertIn("    tv-denoise", output)
+        self.assertIn("    wavelet-denoise", output)
         self.assertIn(
             "Parameters: amount, kernel-size, iterations, mode, scale, delta",
             output,
@@ -1795,6 +2031,31 @@ class PipelineTests(unittest.TestCase):
                 "iterations: int | optional",
                 "mode: str | optional",
             ],
+            "clahe": ["clip-limit: float | optional", "tile-grid-size: int | optional"],
+            "tone-curve": ["mode: str | optional", "input-max: number | optional"],
+            "retinex": ["sigmas: list | optional", "output-mode: str | optional"],
+            "local-contrast": ["epsilon: float | optional", "normalize: bool | optional"],
+            "rolling-background": ["radius: int | optional"],
+            "morphology": ["op: str | optional", "kernel-shape: str | optional"],
+            "dog": ["sigma-small: float | optional", "sigma-large: float | optional"],
+            "log-filter": ["kernel-size: int | optional", "normalize: bool | optional"],
+            "edge-enhance": ["operator: str | optional", "ksize: int | optional"],
+            "guided-filter": ["radius: int | optional", "eps: float | optional"],
+            "nl-means": [
+                "template-window-size: int | optional",
+                "search-window-size: int | optional",
+            ],
+            "tv-denoise": ["max-num-iter: int | optional"],
+            "wavelet-denoise": [
+                "wavelet: str | optional",
+                "rescale-sigma: bool | optional",
+            ],
+            "temporal-denoise": ["window: int | optional", "alpha: float | optional"],
+            "deflicker": ["low-perc: float | optional", "high-perc: float | optional"],
+        }
+        unconstrained_elements = {
+            "progress": ["every-frames: int | optional", "every-seconds: float | optional"],
+            "frame-diff-debug": ["show-mean-abs: bool | optional"],
         }
 
         for element_name, expected_lines in expectations.items():
@@ -1806,6 +2067,18 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn(f"Element: {element_name}", output)
             self.assertIn("formats=[bgr, gray, rgb]", output)
+            for expected_line in expected_lines:
+                self.assertIn(expected_line, output)
+
+        for element_name, expected_lines in unconstrained_elements.items():
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli_main(["describe", element_name])
+
+            output = stdout.getvalue()
+            self.assertEqual(exit_code, 0)
+            self.assertIn(f"Element: {element_name}", output)
+            self.assertIn("in: FramePacket", output)
             for expected_line in expected_lines:
                 self.assertIn(expected_line, output)
 

@@ -29,6 +29,10 @@ _PARAMETER_NAMES = {
     "show-std",
     "show-median",
     "show-preview",
+    "show-percentiles",
+    "percentiles",
+    "show-histogram",
+    "hist-bins",
     "preview-rows",
     "preview-cols",
     "preview-mode",
@@ -116,6 +120,30 @@ class Debug(Transformer):
                     default=False,
                     description="Print bounded frame sample slices.",
                 ),
+                "show-percentiles": ParameterContract(
+                    "show-percentiles",
+                    "bool",
+                    default=False,
+                    description="Print configured frame percentiles.",
+                ),
+                "percentiles": ParameterContract(
+                    "percentiles",
+                    "list",
+                    default="0.001,0.01,0.5,0.99,0.999",
+                    description="Comma-separated percentile fractions.",
+                ),
+                "show-histogram": ParameterContract(
+                    "show-histogram",
+                    "bool",
+                    default=False,
+                    description="Print compact histogram counts.",
+                ),
+                "hist-bins": ParameterContract(
+                    "hist-bins",
+                    "int",
+                    default=64,
+                    description="Histogram bin count.",
+                ),
                 "preview-rows": ParameterContract(
                     "preview-rows",
                     "int",
@@ -171,6 +199,18 @@ class Debug(Transformer):
         self.show_std = _bool(normalized_params.get("show-std", True))
         self.show_median = _bool(normalized_params.get("show-median", True))
         self.show_preview = _bool(normalized_params.get("show-preview", False))
+        self.show_percentiles = _bool(
+            normalized_params.get("show-percentiles", False)
+        )
+        self.percentiles = _parse_float_list(
+            normalized_params.get("percentiles", "0.001,0.01,0.5,0.99,0.999")
+        )
+        if any(percentile < 0.0 or percentile > 1.0 for percentile in self.percentiles):
+            raise ValueError("debug percentiles must be in the range 0.0..1.0")
+        self.show_histogram = _bool(normalized_params.get("show-histogram", False))
+        self.hist_bins = int(normalized_params.get("hist-bins", 64))
+        if self.hist_bins <= 0:
+            raise ValueError("debug hist-bins must be positive")
 
         self.preview_rows = int(normalized_params.get("preview-rows", 4))
         self.preview_cols = int(normalized_params.get("preview-cols", 8))
@@ -252,6 +292,15 @@ class Debug(Transformer):
         if stats:
             lines.append(" ".join(stats))
 
+        if frame.size and self.show_percentiles:
+            values = [
+                f"p{percentile:g}={float(np.quantile(frame, percentile)):.6g}"
+                for percentile in self.percentiles
+            ]
+            lines.append("percentiles " + " ".join(values))
+        if frame.size and self.show_histogram:
+            hist, _ = np.histogram(frame, bins=self.hist_bins)
+            lines.append(f"histogram bins={self.hist_bins}: {hist.tolist()}")
         if self.show_preview:
             lines.extend(self._format_previews(frame))
         return "\n".join(lines)
@@ -327,6 +376,14 @@ def _optional_int(params: dict[str, Any], name: str) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _parse_float_list(value: Any) -> list[float]:
+    if isinstance(value, str):
+        return [float(part.strip()) for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [float(part) for part in value]
+    return [float(value)]
 
 
 def _slice_top_left(frame: np.ndarray, rows: int, cols: int) -> np.ndarray:

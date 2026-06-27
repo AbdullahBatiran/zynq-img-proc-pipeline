@@ -55,21 +55,38 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.sources.filesrc import FileSource
     from src.transformers.bit_shift import BitShift
     from src.transformers.bilateral import Bilateral
+    from src.transformers.clahe import Clahe
     from src.transformers.bypass import Bypass
     from src.transformers.combine import Combine
     from src.transformers.debug import Debug
     from src.transformers.dtype_convert import DtypeConvert
+    from src.transformers.deflicker import Deflicker
+    from src.transformers.dog import Dog
+    from src.transformers.edge_enhance import EdgeEnhance
     from src.transformers.fan_out import FanOut
+    from src.transformers.frame_diff_debug import FrameDiffDebug
     from src.transformers.gaussian import Gaussian
+    from src.transformers.guided_filter import GuidedFilter
     from src.transformers.hist_equalize import HistEqualize
     from src.transformers.interlace_mimic_test import InterlaceMimicTest
     from src.transformers.laplacian_sharp import LaplacianSharp
     from src.transformers.linear_scale import LinearScale
+    from src.transformers.local_contrast import LocalContrast
+    from src.transformers.log_filter import LogFilter
     from src.transformers.median import Median
+    from src.transformers.morphology import Morphology
+    from src.transformers.nl_means import NlMeans
+    from src.transformers.progress import Progress
+    from src.transformers.retinex import Retinex
     from src.transformers.mono_to_color import MonoToColor
     from src.transformers.resize import Resize
     from src.transformers.text_overlay import TextOverlay
+    from src.transformers.rolling_background import RollingBackground
+    from src.transformers.temporal_denoise import TemporalDenoise
+    from src.transformers.tone_curve import ToneCurve
     from src.transformers.unsharp import Unsharp
+    from src.transformers.tv_denoise import TvDenoise
+    from src.transformers.wavelet_denoise import WaveletDenoise
 
     for element_cls in (
         FileSource,
@@ -77,16 +94,33 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Resize,
         HistEqualize,
         LinearScale,
+        Clahe,
+        ToneCurve,
+        Retinex,
+        LocalContrast,
+        RollingBackground,
         Unsharp,
         Median,
         Gaussian,
         Bilateral,
         LaplacianSharp,
+        Morphology,
+        Dog,
+        LogFilter,
+        EdgeEnhance,
+        GuidedFilter,
+        NlMeans,
+        TvDenoise,
+        WaveletDenoise,
         DtypeConvert,
         Bypass,
         Debug,
+        Progress,
+        FrameDiffDebug,
         InterlaceMimicTest,
         FanOut,
+        TemporalDenoise,
+        Deflicker,
         Combine,
         MonoToColor,
         TextOverlay,
