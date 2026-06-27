@@ -53,17 +53,25 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.sinks.displaysink import DisplaySink
     from src.sinks.filesink import FileSink
     from src.sources.filesrc import FileSource
+    from src.transformers.bilateral import Bilateral
     from src.transformers.combine import Combine
     from src.transformers.debug import Debug
+    from src.transformers.gaussian import Gaussian
     from src.transformers.hist_equalize import HistEqualize
     from src.transformers.linear_scale import LinearScale
+    from src.transformers.median import Median
     from src.transformers.resize import Resize
+    from src.transformers.unsharp import Unsharp
 
     for element_cls in (
         FileSource,
         Resize,
         HistEqualize,
         LinearScale,
+        Unsharp,
+        Median,
+        Gaussian,
+        Bilateral,
         Debug,
         Combine,
         FileSink,

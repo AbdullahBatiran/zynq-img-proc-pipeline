@@ -18,11 +18,15 @@ from src.lib.pipeline import ConnectionSpec, ElementSpec, Pipeline, PipelineSpec
 from src.lib.registry import register_builtin_elements
 from src.sinks.displaysink import DisplaySink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
+from src.transformers.bilateral import Bilateral
 from src.transformers.combine import Combine
 from src.transformers.debug import Debug
+from src.transformers.gaussian import Gaussian
 from src.transformers.hist_equalize import HistEqualize
 from src.transformers.linear_scale import LinearScale
+from src.transformers.median import Median
 from src.transformers.resize import Resize
+from src.transformers.unsharp import Unsharp
 
 
 def packet(
@@ -339,6 +343,94 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(int(result.data[0, 0, 1]), 13)
         self.assertEqual(int(result.data.max()), 255)
 
+    def test_filters_preserve_dtype_depth_shape_and_metadata(self) -> None:
+        cases = [
+            (Unsharp, "unsharp", {"amount": 0.5, "kernel-size": 3}),
+            (Median, "median", {"kernel-size": 3}),
+            (Gaussian, "gaussian", {"kernel-size": 3, "sigma-x": 0.0}),
+            (
+                Bilateral,
+                "bilateral",
+                {"diameter": 3, "sigma-color": 25.0, "sigma-space": 3.0},
+            ),
+        ]
+        frames = [
+            np.arange(25, dtype=np.uint8).reshape((5, 5)),
+            (np.arange(25, dtype=np.uint16).reshape((5, 5)) * 100),
+        ]
+
+        for transform_cls, filter_name, params in cases:
+            for frame in frames:
+                with self.subTest(filter=filter_name, dtype=frame.dtype):
+                    source = packet(frame, fmt="gray")
+                    transform = transform_cls("f", params)
+                    result = transform.process({"in": source})["out"][0]
+
+                    self.assertEqual(result.data.dtype, frame.dtype)
+                    self.assertEqual(result.data.shape, frame.shape)
+                    self.assertEqual(result.metadata.depth, source.metadata.depth)
+                    self.assertEqual(result.metadata.channels, source.metadata.channels)
+                    self.assertEqual(result.metadata.extra["filtered_by"], "f")
+                    self.assertEqual(result.metadata.extra["filter_name"], filter_name)
+                    filter_params = result.metadata.extra["filter_params"]
+                    for key, value in params.items():
+                        self.assertEqual(filter_params[key], value)
+                    self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_filters_preserve_three_channel_shape(self) -> None:
+        frame = (np.arange(5 * 5 * 3, dtype=np.uint16).reshape((5, 5, 3)) * 100)
+        cases = [
+            Unsharp("f", {"kernel-size": 3}),
+            Median("f", {"kernel-size": 3}),
+            Gaussian("f", {"kernel-size": 3}),
+            Bilateral("f", {"diameter": 3, "sigma-color": 100.0}),
+        ]
+
+        for transform in cases:
+            with self.subTest(filter=transform.type_name):
+                result = transform.process({"in": packet(frame, fmt="rgb")})["out"][0]
+                self.assertEqual(result.data.dtype, np.uint16)
+                self.assertEqual(result.data.shape, frame.shape)
+                self.assertEqual(result.metadata.channels, 3)
+                self.assertEqual(result.metadata.format, "rgb")
+
+    def test_filter_aliases_and_hyphenated_params(self) -> None:
+        source = packet(np.arange(25, dtype=np.uint8).reshape((5, 5)), fmt="gray")
+        transforms = [
+            Unsharp("f", {"kernel_size": 3}),
+            Gaussian("f", {"kernel_size": 3, "sigma_x": 1.0, "sigma_y": 1.0}),
+            Bilateral("f", {"sigma_color": 20.0, "sigma_space": 2.0}),
+        ]
+
+        for transform in transforms:
+            with self.subTest(filter=transform.type_name):
+                result = transform.process({"in": source})["out"][0]
+                self.assertEqual(result.data.dtype, np.uint8)
+
+    def test_filter_rejects_invalid_parameters(self) -> None:
+        invalid_configurations = [
+            (Unsharp, {"amount": -0.1}),
+            (Unsharp, {"sigma": -1.0}),
+            (Unsharp, {"kernel-size": 2}),
+            (Median, {"kernel-size": 0}),
+            (Median, {"kernel-size": 4}),
+            (Gaussian, {"kernel-size": 2}),
+            (Gaussian, {"sigma-x": -1.0}),
+            (Gaussian, {"sigma-y": -1.0}),
+            (Bilateral, {"diameter": 0}),
+            (Bilateral, {"sigma-color": -1.0}),
+            (Bilateral, {"sigma-space": -1.0}),
+        ]
+        for transform_cls, params in invalid_configurations:
+            with self.subTest(transform=transform_cls.__name__, params=params):
+                with self.assertRaises(ValueError):
+                    transform_cls("f", params)
+
+        with self.assertRaises(ValueError):
+            Median("f", {"kernel-size": 7}).process(
+                {"in": packet(np.zeros((5, 5), dtype=np.uint16), fmt="gray")}
+            )
+
     def test_debug_default_prints_once_and_passes_same_packet(self) -> None:
         transform = Debug("dbg", {})
         source = packet(np.array([[1, 2], [3, 4]], dtype=np.uint8), fmt="gray")
@@ -545,6 +637,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[1].params["every-seconds"], 1)
         self.assertTrue(spec.elements[1].params["show-preview"])
 
+    def test_cli_parser_accepts_hyphenated_filter_params(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mp4 ! Unsharp kernel-size=3 ! gaussian sigma-x=1.0 "
+            "! bilateral sigma-color=25 sigma-space=3 ! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "Unsharp")
+        self.assertEqual(spec.elements[1].params["kernel-size"], 3)
+        self.assertEqual(spec.elements[2].type, "gaussian")
+        self.assertEqual(spec.elements[2].params["sigma-x"], 1.0)
+        self.assertEqual(spec.elements[3].type, "bilateral")
+        self.assertEqual(spec.elements[3].params["sigma-color"], 25)
+        self.assertEqual(spec.elements[3].params["sigma-space"], 3)
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -566,8 +672,12 @@ class PipelineTests(unittest.TestCase):
 
         output = stdout.getvalue()
         self.assertEqual(exit_code, 0)
+        self.assertIn("bilateral:", output)
+        self.assertIn("params=[diameter, sigma-color, sigma-space]", output)
         self.assertIn("filesrc:", output)
         self.assertIn("params=[path, stream_id, source_id", output)
+        self.assertIn("gaussian:", output)
+        self.assertIn("params=[kernel-size, sigma-x, sigma-y]", output)
         self.assertIn("debug:", output)
         self.assertIn("params=[enabled, every-seconds, every-frames", output)
         self.assertIn("hist_equalize:", output)
@@ -577,6 +687,10 @@ class PipelineTests(unittest.TestCase):
             "params=[otype, omin, omax, min, max, perc, perc-down, perc-up]",
             output,
         )
+        self.assertIn("median:", output)
+        self.assertIn("params=[kernel-size]", output)
+        self.assertIn("unsharp:", output)
+        self.assertIn("params=[amount, sigma, kernel-size]", output)
 
     def test_cli_describe_linear_scale_shows_element_details(self) -> None:
         stdout = io.StringIO()
@@ -613,6 +727,30 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("every-seconds: float | optional", output)
         self.assertIn("show-preview: bool | optional", output)
         self.assertIn("preview-mode: str | optional", output)
+
+    def test_cli_describe_filter_elements(self) -> None:
+        expectations = {
+            "unsharp": ["amount: float | optional", "kernel-size: int | optional"],
+            "median": ["kernel-size: int | optional"],
+            "gaussian": ["sigma-x: float | optional", "sigma-y: float | optional"],
+            "bilateral": [
+                "diameter: int | optional",
+                "sigma-color: float | optional",
+                "sigma-space: float | optional",
+            ],
+        }
+
+        for element_name, expected_lines in expectations.items():
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli_main(["describe", element_name])
+
+            output = stdout.getvalue()
+            self.assertEqual(exit_code, 0)
+            self.assertIn(f"Element: {element_name}", output)
+            self.assertIn("formats=[bgr, gray, rgb]", output)
+            for expected_line in expected_lines:
+                self.assertIn(expected_line, output)
 
     def test_cli_describe_shows_element_details(self) -> None:
         stdout = io.StringIO()
