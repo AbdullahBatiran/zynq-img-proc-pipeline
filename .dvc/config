@@ -1,0 +1,5 @@
+[core]
+    remote = cloud_storage
+['remote "cloud_storage"']
+    url = s3://ir-data
+    endpointurl = https://b330d914c91f93bb61825ffc6b70f65b.r2.cloudflarestorage.com
