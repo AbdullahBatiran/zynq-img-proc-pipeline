@@ -1,0 +1,23 @@
+# Supply the file by any value between rec0 and rec4 so the file name is corrected
+
+
+filesrc path=data/corrected-videos/$1.mkv preserve_native=true format=gray 
+! linear-scale omax=16383 perc=0.01 
+! fan-out name=f
+
+f.out0 
+! median 
+! laplacian-sharp name=first
+
+f.out1 
+! laplacian-sharp
+! median name=second
+
+first.out 
+! combine.in0 name=c
+
+second.out 
+! c.in1
+
+c.out 
+! displaysink depth=14
