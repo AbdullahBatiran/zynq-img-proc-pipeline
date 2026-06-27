@@ -127,8 +127,13 @@ class Pipeline:
         source_counts = {source_id: 0 for source_id in source_ids}
 
         try:
-            while active_sources or self._has_buffered_packets(buffers):
+            while (
+                not self.context.stop_requested
+                and (active_sources or self._has_buffered_packets(buffers))
+            ):
                 for source_id in list(active_sources):
+                    if self.context.stop_requested:
+                        break
                     if max_frames is not None and source_counts[source_id] >= max_frames:
                         active_sources.remove(source_id)
                         continue
@@ -143,7 +148,7 @@ class Pipeline:
 
                 progressed = True
                 processed_any = False
-                while progressed:
+                while progressed and not self.context.stop_requested:
                     progressed = self._process_ready_elements(buffers)
                     processed_any = processed_any or progressed
                 if (

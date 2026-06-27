@@ -21,8 +21,8 @@ move through the pipeline without metadata.
   metadata including width, height, fps, format, depth, channels, timestamp, and
   frame index.
 - `resize`: resizes frames and updates dimension metadata.
-- `hist_equalize`: applies global histogram equalization or CLAHE to 8-bit gray,
-  BGR, or RGB frames.
+- `hist_equalize`: applies normal histogram equalization to 8-bit or 16-bit gray,
+  BGR, or RGB frames with configurable histogram bin count.
 - `combine`: combines two synchronized streams horizontally, vertically, or by
   overlay while preserving both input packet ids as provenance.
 - `filesink`: writes frames to a video file.
@@ -32,7 +32,13 @@ move through the pipeline without metadata.
 Simple linear pipeline:
 
 ```bash
-zpipe run "filesrc path=input.mp4 ! resize width=640 height=480 ! hist_equalize mode=clahe ! filesink path=out.mp4"
+zpipe run "filesrc path=input.mp4 ! resize width=640 height=480 ! hist_equalize bins=256 ! filesink path=out.mp4"
+```
+
+Mono 16-bit pipeline:
+
+```bash
+zpipe run "filesrc path=input.mkv format=gray depth=16 preserve_native=true ! hist_equalize bins=65536 ! displaysink"
 ```
 
 Named graph pipeline:

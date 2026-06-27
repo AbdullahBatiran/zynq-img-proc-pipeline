@@ -7,7 +7,7 @@ spec = PipelineSpec(
     elements=[
         ElementSpec(id="src", type="filesrc", params={"path": "input.mp4"}),
         ElementSpec(id="resize", type="resize", params={"width": 640, "height": 480}),
-        ElementSpec(id="eq", type="hist_equalize", params={"mode": "clahe"}),
+        ElementSpec(id="eq", type="hist_equalize", params={"bins": 256}),
         ElementSpec(id="out", type="filesink", params={"path": "out.mp4"}),
     ],
     connections=[

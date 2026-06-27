@@ -17,6 +17,10 @@ PacketOutputs = dict[str, list[FramePacket]]
 class PipelineContext:
     run_name: str = "default"
     extra: dict[str, Any] = field(default_factory=dict)
+    stop_requested: bool = False
+
+    def request_stop(self) -> None:
+        self.stop_requested = True
 
 
 class Element:

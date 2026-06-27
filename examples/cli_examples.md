@@ -3,7 +3,13 @@
 Run a linear processing pipeline:
 
 ```bash
-zpipe run "filesrc path=input.mp4 ! resize width=640 height=480 ! hist_equalize mode=clahe ! filesink path=out.mp4"
+zpipe run "filesrc path=input.mp4 ! resize width=640 height=480 ! hist_equalize bins=256 ! filesink path=out.mp4"
+```
+
+Run a mono 16-bit video while asking OpenCV to preserve native decoded frames:
+
+```bash
+zpipe run "filesrc path=input.mkv format=gray depth=16 preserve_native=true ! hist_equalize bins=65536 ! displaysink"
 ```
 
 Run two sources, resize both, combine them horizontally, and display the result:

@@ -7,7 +7,7 @@ from typing import Any
 import cv2
 
 from src.lib.contracts import ElementContract, PortContract
-from src.lib.elements import PacketInputs, PacketOutputs, Sink
+from src.lib.elements import PacketInputs, PacketOutputs, PipelineContext, Sink
 
 
 class DisplaySink(Sink):
@@ -31,17 +31,26 @@ class DisplaySink(Sink):
         self.fps = float(params["fps"]) if params.get("fps") is not None else None
         self.sync = bool(params.get("sync", True))
         self.enabled = bool(params.get("enabled", True))
+        self.quit_key = str(params.get("quit_key", "q"))
+        self.context: PipelineContext | None = None
+
+    def start(self, context: PipelineContext) -> None:
+        self.context = context
 
     def process(self, inputs: PacketInputs) -> PacketOutputs:
         packet = self._single_input(inputs)
         if self.enabled:
             cv2.imshow(self.window_name, packet.data)
-            cv2.waitKey(self._wait_ms(packet))
+            key = cv2.waitKey(self._wait_ms(packet)) & 0xFF
+            if self.quit_key and key == ord(self.quit_key[0]):
+                if self.context is not None:
+                    self.context.request_stop()
         return {}
 
     def stop(self) -> None:
         if self.enabled:
             cv2.destroyWindow(self.window_name)
+        self.context = None
 
     def _wait_ms(self, packet) -> int:
         if self.wait_ms is not None:
