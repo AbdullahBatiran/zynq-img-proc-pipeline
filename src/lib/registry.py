@@ -54,6 +54,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.sinks.filesink import FileSink
     from src.sources.filesrc import FileSource
     from src.transformers.combine import Combine
+    from src.transformers.debug import Debug
     from src.transformers.hist_equalize import HistEqualize
     from src.transformers.linear_scale import LinearScale
     from src.transformers.resize import Resize
@@ -63,6 +64,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Resize,
         HistEqualize,
         LinearScale,
+        Debug,
         Combine,
         FileSink,
         DisplaySink,

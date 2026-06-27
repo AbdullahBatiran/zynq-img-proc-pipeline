@@ -19,6 +19,7 @@ from src.lib.registry import register_builtin_elements
 from src.sinks.displaysink import DisplaySink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
 from src.transformers.combine import Combine
+from src.transformers.debug import Debug
 from src.transformers.hist_equalize import HistEqualize
 from src.transformers.linear_scale import LinearScale
 from src.transformers.resize import Resize
@@ -278,6 +279,167 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(int(result.data[0, 0, 1]), 13)
         self.assertEqual(int(result.data.max()), 255)
 
+    def test_debug_default_prints_once_and_passes_same_packet(self) -> None:
+        transform = Debug("dbg", {})
+        source = packet(np.array([[1, 2], [3, 4]], dtype=np.uint8), fmt="gray")
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            first = transform.process({"in": source})["out"][0]
+            second = transform.process({"in": source})["out"][0]
+
+        output = stdout.getvalue()
+        self.assertIs(first, source)
+        self.assertIs(second, source)
+        self.assertEqual(output.count("[debug dbg]"), 1)
+        self.assertIn("shape=(2, 2)", output)
+        self.assertIn("dtype=uint8", output)
+        self.assertIn("min=1", output)
+        self.assertIn("max=4", output)
+        self.assertIn("mean=2.5", output)
+        self.assertIn("std=1.11803", output)
+        self.assertIn("median=2.5", output)
+
+    def test_debug_disabled_suppresses_output_and_passes_packet(self) -> None:
+        transform = Debug("dbg", {"enabled": False})
+        source = packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            result = transform.process({"in": source})["out"][0]
+
+        self.assertIs(result, source)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_debug_every_seconds_uses_packet_pts(self) -> None:
+        transform = Debug("dbg", {"every-seconds": 1.0})
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            for index in (0, 15, 30, 45, 60):
+                transform.process(
+                    {"in": packet(np.zeros((1, 1), dtype=np.uint8), index=index)}
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("index=0 pts=0.000000", output)
+        self.assertNotIn("index=15 pts=0.500000", output)
+        self.assertIn("index=30 pts=1.000000", output)
+        self.assertNotIn("index=45 pts=1.500000", output)
+        self.assertIn("index=60 pts=2.000000", output)
+
+    def test_debug_every_frames_prints_expected_indexes(self) -> None:
+        transform = Debug("dbg", {"every-frames": 2})
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            for index in range(5):
+                transform.process(
+                    {"in": packet(np.zeros((1, 1), dtype=np.uint8), index=index)}
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("index=0", output)
+        self.assertNotIn("index=1", output)
+        self.assertIn("index=2", output)
+        self.assertNotIn("index=3", output)
+        self.assertIn("index=4", output)
+
+    def test_debug_field_toggles_include_and_exclude_output(self) -> None:
+        transform = Debug(
+            "dbg",
+            {
+                "show_shape": False,
+                "show-dtype": True,
+                "show-min": True,
+                "show-max": False,
+                "show-mean": False,
+                "show-std": False,
+                "show-median": False,
+                "show-preview": True,
+                "preview-rows": 1,
+                "preview-cols": 2,
+                "preview-mode": "top-left",
+            },
+        )
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            transform.process(
+                {"in": packet(np.array([[1, 2], [3, 4]], dtype=np.uint8), fmt="gray")}
+            )
+
+        output = stdout.getvalue()
+        self.assertNotIn("shape=", output)
+        self.assertIn("dtype=uint8", output)
+        self.assertIn("min=1", output)
+        self.assertNotIn("max=", output)
+        self.assertNotIn("mean=", output)
+        self.assertNotIn("std=", output)
+        self.assertNotIn("median=", output)
+        self.assertIn("preview top-left", output)
+        self.assertNotIn("preview center", output)
+
+    def test_debug_preview_both_includes_top_left_and_center(self) -> None:
+        transform = Debug(
+            "dbg",
+            {"show-preview": True, "preview-rows": 2, "preview-cols": 2},
+        )
+        stdout = io.StringIO()
+        frame = np.arange(16, dtype=np.uint8).reshape((4, 4))
+
+        with contextlib.redirect_stdout(stdout):
+            transform.process({"in": packet(frame, fmt="gray")})
+
+        output = stdout.getvalue()
+        self.assertIn("preview top-left rows=2 cols=2:", output)
+        self.assertIn("[[0 1]\n [4 5]]", output)
+        self.assertIn("preview center rows=2 cols=2:", output)
+        self.assertIn("[[ 5  6]\n [ 9 10]]", output)
+
+    def test_debug_supports_stdout_stderr_and_shared_file_output(self) -> None:
+        stdout_transform = Debug("out", {"label": "stdout-label"})
+        stderr_transform = Debug("err", {"stream": "stderr", "label": "stderr-label"})
+        frame = packet(np.zeros((1, 1), dtype=np.uint8))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            stdout_transform.process({"in": frame})
+            stderr_transform.process({"in": frame})
+
+        self.assertIn("[debug stdout-label]", stdout.getvalue())
+        self.assertIn("[debug stderr-label]", stderr.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "debug.log"
+            first = Debug("a", {"stream": "file", "path": str(path), "label": "a"})
+            second = Debug("b", {"stream": "file", "path": str(path), "label": "b"})
+            first.process({"in": frame})
+            second.process({"in": frame})
+            first.stop()
+            second.stop()
+
+            output = path.read_text(encoding="utf-8")
+            self.assertIn("[debug a]", output)
+            self.assertIn("[debug b]", output)
+
+    def test_debug_rejects_invalid_parameters(self) -> None:
+        invalid_params = [
+            {"every-seconds": 1, "every-frames": 1},
+            {"every-seconds": 0},
+            {"every-frames": 0},
+            {"stream": "missing"},
+            {"stream": "file"},
+            {"preview-rows": 0},
+            {"preview-cols": 0},
+            {"preview-mode": "corner"},
+            {"every_seconds": 1, "every-seconds": 2},
+        ]
+        for params in invalid_params:
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                Debug("dbg", params)
+
     def test_combine_horizontal_preserves_both_parents(self) -> None:
         left = packet(np.zeros((4, 5, 3), dtype=np.uint8), stream_id="l")
         right = packet(np.ones((4, 6, 3), dtype=np.uint8), stream_id="r")
@@ -314,6 +476,15 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[1].type, "linear-scale")
         self.assertEqual(spec.elements[1].params["perc-up"], 0.01)
 
+    def test_cli_parser_accepts_hyphenated_debug_params(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mp4 ! debug every-seconds=1 show-preview=true "
+            "! filesink path=out.mp4"
+        )
+        self.assertEqual(spec.elements[1].type, "debug")
+        self.assertEqual(spec.elements[1].params["every-seconds"], 1)
+        self.assertTrue(spec.elements[1].params["show-preview"])
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -337,6 +508,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("filesrc:", output)
         self.assertIn("params=[path, stream_id, source_id", output)
+        self.assertIn("debug:", output)
+        self.assertIn("params=[enabled, every-seconds, every-frames", output)
         self.assertIn("hist_equalize:", output)
         self.assertIn("params=[bins]", output)
         self.assertIn("linear-scale:", output)
@@ -356,6 +529,18 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("otype: str | optional", output)
         self.assertIn("perc-up: float | optional", output)
         self.assertIn("formats=[bgr, gray, rgb]", output)
+
+    def test_cli_describe_debug_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "debug"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: debug", output)
+        self.assertIn("every-seconds: float | optional", output)
+        self.assertIn("show-preview: bool | optional", output)
+        self.assertIn("preview-mode: str | optional", output)
 
     def test_cli_describe_shows_element_details(self) -> None:
         stdout = io.StringIO()
