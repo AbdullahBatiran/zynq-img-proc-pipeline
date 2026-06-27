@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import cv2
+import numpy as np
 
 from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, PipelineContext, Sink
@@ -50,6 +51,12 @@ class DisplaySink(Sink):
                     default=True,
                     description="Disable OpenCV display calls for tests/headless runs.",
                 ),
+                "autorange": ParameterContract(
+                    "autorange",
+                    "bool",
+                    default=False,
+                    description="Stretch each frame to the dtype display range.",
+                ),
                 "quit_key": ParameterContract(
                     "quit_key",
                     "str",
@@ -69,6 +76,7 @@ class DisplaySink(Sink):
         self.fps = float(params["fps"]) if params.get("fps") is not None else None
         self.sync = bool(params.get("sync", True))
         self.enabled = bool(params.get("enabled", True))
+        self.autorange = bool(params.get("autorange", False))
         self.quit_key = str(params.get("quit_key", "q"))
         self.context: PipelineContext | None = None
 
@@ -78,7 +86,7 @@ class DisplaySink(Sink):
     def process(self, inputs: PacketInputs) -> PacketOutputs:
         packet = self._single_input(inputs)
         if self.enabled:
-            cv2.imshow(self.window_name, packet.data)
+            cv2.imshow(self.window_name, self._display_frame(packet.data))
             key = cv2.waitKey(self._wait_ms(packet)) & 0xFF
             if self.quit_key and key == ord(self.quit_key[0]):
                 if self.context is not None:
@@ -98,3 +106,33 @@ class DisplaySink(Sink):
             if fps and fps > 0:
                 return max(1, round(1000.0 / fps))
         return 1
+
+    def _display_frame(self, frame: np.ndarray) -> np.ndarray:
+        if not self.autorange:
+            return frame
+        if frame.size == 0:
+            return frame
+
+        input_min = float(np.min(frame))
+        input_max = float(np.max(frame))
+        if input_min >= input_max:
+            return np.zeros_like(frame)
+
+        output_min, output_max = _display_range_for_dtype(frame.dtype)
+        scaled = (
+            (frame.astype(np.float64) - input_min)
+            * (output_max - output_min)
+            / (input_max - input_min)
+            + output_min
+        )
+        scaled = np.clip(scaled, output_min, output_max)
+        if np.issubdtype(frame.dtype, np.integer):
+            scaled = np.rint(scaled)
+        return scaled.astype(frame.dtype)
+
+
+def _display_range_for_dtype(dtype: np.dtype) -> tuple[float, float]:
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        return float(info.min), float(info.max)
+    return 0.0, 1.0

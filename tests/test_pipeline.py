@@ -627,6 +627,16 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("format: str | optional", output)
         self.assertIn("Output ports:", output)
 
+    def test_cli_describe_displaysink_shows_autorange(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "displaysink"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: displaysink", output)
+        self.assertIn("autorange: bool | optional | default=False", output)
+
     def test_cli_describe_unknown_element_returns_error(self) -> None:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -644,6 +654,37 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(metadata_fps_sink._wait_ms(frame), 33)
         self.assertEqual(explicit_fps_sink._wait_ms(frame), 40)
         self.assertEqual(wait_sink._wait_ms(frame), 7)
+
+    def test_displaysink_autorange_false_returns_original_frame(self) -> None:
+        sink = DisplaySink("display", {"enabled": False})
+        frame = np.array([[100, 200]], dtype=np.uint16)
+
+        self.assertIs(sink._display_frame(frame), frame)
+
+    def test_displaysink_autorange_stretches_uint16_to_display_range(self) -> None:
+        sink = DisplaySink("display", {"enabled": False, "autorange": True})
+        frame = np.array([[100, 150, 200]], dtype=np.uint16)
+
+        result = sink._display_frame(frame)
+
+        self.assertEqual(result.dtype, np.uint16)
+        self.assertEqual(result.tolist(), [[0, 32768, 65535]])
+        self.assertEqual(frame.tolist(), [[100, 150, 200]])
+
+    def test_displaysink_process_uses_autorange_frame_for_imshow(self) -> None:
+        frame = packet(np.array([[100, 200]], dtype=np.uint16), fmt="gray")
+        sink = DisplaySink("display", {"autorange": True, "wait_ms": 1})
+
+        with (
+            patch("src.sinks.displaysink.cv2.imshow") as imshow,
+            patch("src.sinks.displaysink.cv2.waitKey", return_value=-1),
+        ):
+            sink.process({"in": frame})
+
+        shown = imshow.call_args.args[1]
+        self.assertEqual(shown.dtype, np.uint16)
+        self.assertEqual(shown.tolist(), [[0, 65535]])
+        self.assertEqual(frame.data.tolist(), [[100, 200]])
 
     def test_displaysink_q_requests_pipeline_stop(self) -> None:
         frame = packet(np.zeros((4, 5, 3), dtype=np.uint8))
