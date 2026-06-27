@@ -142,6 +142,66 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.metadata.format, "rgb")
         self.assertEqual(result.metadata.depth, 16)
         self.assertEqual(result.metadata.extra["hist_bins"], 65536)
+        self.assertEqual(result.metadata.extra["hist_output_max"], 65535)
+
+    def test_hist_equalize_uint16_output_bits_14_keeps_container_depth(self) -> None:
+        transform = HistEqualize("eq", {"output-bits": 14})
+        frame = np.linspace(0, 65535, 64, dtype=np.uint16).reshape((8, 8))
+        result = transform.process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertLessEqual(int(result.data.max()), 16383)
+        self.assertEqual(result.metadata.extra["hist_bins"], 16384)
+        self.assertEqual(result.metadata.extra["hist_output_max"], 16383)
+        self.assertEqual(result.metadata.extra["hist_output_bits"], 14)
+
+    def test_hist_equalize_uint16_output_bits_12(self) -> None:
+        transform = HistEqualize("eq", {"output_bits": 12})
+        frame = np.linspace(0, 65535, 64, dtype=np.uint16).reshape((8, 8))
+        result = transform.process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertLessEqual(int(result.data.max()), 4095)
+        self.assertEqual(result.metadata.extra["hist_bins"], 4096)
+        self.assertEqual(result.metadata.extra["hist_output_max"], 4095)
+        self.assertEqual(result.metadata.extra["hist_output_bits"], 12)
+
+    def test_hist_equalize_output_max(self) -> None:
+        transform = HistEqualize("eq", {"output-max": 1000})
+        frame = np.array([[0, 100, 1000], [2000, 3000, 5000]], dtype=np.uint16)
+        result = transform.process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertLessEqual(int(result.data.max()), 1000)
+        self.assertEqual(result.metadata.extra["hist_bins"], 1001)
+        self.assertEqual(result.metadata.extra["hist_output_max"], 1000)
+        self.assertNotIn("hist_output_bits", result.metadata.extra)
+
+    def test_hist_equalize_rejects_invalid_output_range_params(self) -> None:
+        for params in (
+            {"output-bits": 0},
+            {"output-max": -1},
+            {"output-bits": 14, "output-max": 16383},
+            {"output_bits": 14, "output-bits": 12},
+        ):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                HistEqualize("eq", params)
+
+        with self.assertRaises(ValueError):
+            HistEqualize("eq", {"output-bits": 17}).process(
+                {"in": packet(np.zeros((2, 2), dtype=np.uint16), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            HistEqualize("eq", {"output-bits": 9}).process(
+                {"in": packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            HistEqualize("eq", {"output-max": 65536}).process(
+                {"in": packet(np.zeros((2, 2), dtype=np.uint16), fmt="gray")}
+            )
 
     def test_hist_equalize_rejects_unsupported_depth(self) -> None:
         transform = HistEqualize("eq", {})
@@ -511,7 +571,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("debug:", output)
         self.assertIn("params=[enabled, every-seconds, every-frames", output)
         self.assertIn("hist_equalize:", output)
-        self.assertIn("params=[bins]", output)
+        self.assertIn("params=[bins, output-bits, output-max]", output)
         self.assertIn("linear-scale:", output)
         self.assertIn(
             "params=[otype, omin, omax, min, max, perc, perc-down, perc-up]",
@@ -529,6 +589,18 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("otype: str | optional", output)
         self.assertIn("perc-up: float | optional", output)
         self.assertIn("formats=[bgr, gray, rgb]", output)
+
+    def test_cli_describe_hist_equalize_shows_output_range_params(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "hist_equalize"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: hist_equalize", output)
+        self.assertIn("bins: int | optional", output)
+        self.assertIn("output-bits: int | optional", output)
+        self.assertIn("output-max: int | optional", output)
 
     def test_cli_describe_debug_shows_element_details(self) -> None:
         stdout = io.StringIO()
