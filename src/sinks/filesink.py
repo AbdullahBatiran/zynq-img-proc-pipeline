@@ -38,6 +38,7 @@ class FileSink(Sink):
                 ),
             },
             description="Write video frames to a file with OpenCV.",
+            subcategory="File",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

@@ -53,6 +53,7 @@ class Bilateral(Transformer):
                 ),
             },
             description="Apply a bilateral filter.",
+            subcategory="Filter",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

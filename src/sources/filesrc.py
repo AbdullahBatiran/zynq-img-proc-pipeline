@@ -68,6 +68,7 @@ class FileSource(Source):
                 ),
             },
             description="Read video frames from a file with OpenCV.",
+            subcategory="File",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

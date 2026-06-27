@@ -76,6 +76,7 @@ class LaplacianSharp(Transformer):
                 ),
             },
             description="Sharpen frames with one or more Laplacian passes.",
+            subcategory="Filter",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

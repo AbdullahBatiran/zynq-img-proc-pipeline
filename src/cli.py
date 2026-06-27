@@ -142,15 +142,44 @@ def _format_element_list(
             continue
         lines.extend(["", group_name])
         if verbose:
-            for name, element_cls in group_elements:
-                lines.extend(_format_verbose_element(name, element_cls.contract()))
+            for subcategory, subcategory_elements in _group_by_subcategory(
+                group_elements
+            ):
+                lines.append(f"  {subcategory}")
+                for name, element_cls in subcategory_elements:
+                    lines.extend(
+                        _format_verbose_element(
+                            name,
+                            element_cls.contract(),
+                            indent="    ",
+                        )
+                    )
         else:
-            name_width = max(len("Name"), *(len(name) for name, _ in group_elements))
-            lines.append(f"  {'Name'.ljust(name_width)}  Description")
-            lines.append(f"  {'-' * name_width}  -----------")
-            for name, element_cls in group_elements:
-                description = element_cls.contract().description or "(none)"
-                lines.append(f"  {name.ljust(name_width)}  {description}")
+            rows = _list_rows(group_elements)
+            name_width = max(len("Name"), *(len(row[0]) for row in rows))
+            subcategory_width = max(
+                len("Subcategory"), *(len(row[1]) for row in rows)
+            )
+            lines.append(
+                f"  {'Name'.ljust(name_width)}  "
+                f"{'Subcategory'.ljust(subcategory_width)}  Description"
+            )
+            lines.append(
+                f"  {'-' * name_width}  "
+                f"{'-' * subcategory_width}  -----------"
+            )
+            previous_subcategory: str | None = None
+            for name, subcategory, description in rows:
+                if (
+                    previous_subcategory is not None
+                    and subcategory != previous_subcategory
+                ):
+                    lines.append("")
+                lines.append(
+                    f"  {name.ljust(name_width)}  "
+                    f"{subcategory.ljust(subcategory_width)}  {description}"
+                )
+                previous_subcategory = subcategory
     return "\n".join(lines)
 
 
@@ -178,21 +207,70 @@ def _elements_of_type(
     return [item for item in elements if issubclass(item[1], element_type)]
 
 
-def _format_verbose_element(name: str, contract: ElementContract) -> list[str]:
-    lines = [f"  {name}"]
-    lines.extend(_format_wrapped_field("Description", contract.description or "(none)"))
-    lines.extend(_format_wrapped_field("Inputs", ", ".join(_input_names(contract))))
+def _group_by_subcategory(
+    elements: list[tuple[str, type[Element]]],
+) -> list[tuple[str, list[tuple[str, type[Element]]]]]:
+    grouped: dict[str, list[tuple[str, type[Element]]]] = {}
+    for name, element_cls in sorted(
+        elements,
+        key=lambda item: (_subcategory(item[1].contract()), item[0]),
+    ):
+        grouped.setdefault(_subcategory(element_cls.contract()), []).append(
+            (name, element_cls)
+        )
+    return list(grouped.items())
+
+
+def _list_rows(
+    elements: list[tuple[str, type[Element]]],
+) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    for subcategory, subcategory_elements in _group_by_subcategory(elements):
+        for name, element_cls in subcategory_elements:
+            contract = element_cls.contract()
+            rows.append((name, subcategory, contract.description or "(none)"))
+    return rows
+
+
+def _subcategory(contract: ElementContract) -> str:
+    return contract.subcategory or "General"
+
+
+def _format_verbose_element(
+    name: str, contract: ElementContract, *, indent: str
+) -> list[str]:
+    field_indent = f"{indent}  "
+    lines = [f"{indent}{name}"]
     lines.extend(
-        _format_wrapped_field("Outputs", ", ".join(contract.output_ports) or "none")
+        _format_wrapped_field(
+            "Description",
+            contract.description or "(none)",
+            indent=field_indent,
+        )
+    )
+    lines.extend(
+        _format_wrapped_field(
+            "Inputs",
+            ", ".join(_input_names(contract)),
+            indent=field_indent,
+        )
+    )
+    lines.extend(
+        _format_wrapped_field(
+            "Outputs",
+            ", ".join(contract.output_ports) or "none",
+            indent=field_indent,
+        )
     )
     lines.extend(
         _format_wrapped_field(
             "Parameters",
             ", ".join(_parameter_names(contract)) or "none",
+            indent=field_indent,
         )
     )
     if any(parameter.required for parameter in contract.parameters.values()):
-        lines.append("    * required")
+        lines.append(f"{field_indent}* required")
     return lines
 
 
@@ -209,8 +287,8 @@ def _parameter_names(contract: ElementContract) -> list[str]:
     ]
 
 
-def _format_wrapped_field(label: str, value: str) -> list[str]:
-    prefix = f"    {label}: "
+def _format_wrapped_field(label: str, value: str, *, indent: str) -> list[str]:
+    prefix = f"{indent}{label}: "
     return textwrap.wrap(
         value,
         width=88,
@@ -223,6 +301,7 @@ def _format_wrapped_field(label: str, value: str) -> list[str]:
 def _format_element_description(name: str, contract: ElementContract) -> str:
     lines = [
         f"Element: {name}",
+        f"Subcategory: {_subcategory(contract)}",
         f"Description: {contract.description or '(none)'}",
         "",
         "Parameters:",

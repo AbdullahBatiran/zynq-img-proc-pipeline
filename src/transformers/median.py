@@ -40,6 +40,7 @@ class Median(Transformer):
                 ),
             },
             description="Apply a median filter.",
+            subcategory="Filter",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

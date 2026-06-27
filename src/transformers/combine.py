@@ -52,6 +52,7 @@ class Combine(Transformer):
                 ),
             },
             description="Combine streams horizontally, vertically, or in a grid.",
+            subcategory="Compose",
             require_same_format=True,
             require_same_depth=True,
             require_same_index=True,

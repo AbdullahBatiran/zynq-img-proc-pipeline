@@ -46,6 +46,7 @@ class Resize(Transformer):
                 ),
             },
             description="Resize video frames.",
+            subcategory="Geometry",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

@@ -46,6 +46,7 @@ class HistEqualize(Transformer):
                 ),
             },
             description="Apply normal histogram equalization.",
+            subcategory="Contrast",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

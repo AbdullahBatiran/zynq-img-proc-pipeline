@@ -67,6 +67,7 @@ class ElementContract:
     output_ports: dict[str, PortContract] = field(default_factory=dict)
     parameters: dict[str, ParameterContract] = field(default_factory=dict)
     description: str = ""
+    subcategory: str | None = None
     require_same_size: bool = False
     require_same_format: bool = False
     require_same_depth: bool = False

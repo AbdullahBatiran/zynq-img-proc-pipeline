@@ -137,6 +137,7 @@ class Debug(Transformer):
                 ),
             },
             description="Print frame diagnostics and pass frames through unchanged.",
+            subcategory="Debug",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

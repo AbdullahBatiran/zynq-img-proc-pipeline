@@ -54,6 +54,7 @@ class Unsharp(Transformer):
                 ),
             },
             description="Sharpen frames using an unsharp mask.",
+            subcategory="Filter",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

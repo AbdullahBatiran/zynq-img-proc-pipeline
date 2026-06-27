@@ -75,6 +75,7 @@ class DisplaySink(Sink):
                 ),
             },
             description="Display video frames in an OpenCV window.",
+            subcategory="GUI",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

@@ -83,6 +83,7 @@ class LinearScale(Transformer):
                 ),
             },
             description="Linearly scale frame intensities.",
+            subcategory="Contrast",
         )
 
     def configure(self, params: dict[str, Any]) -> None:

@@ -52,6 +52,7 @@ class Gaussian(Transformer):
                 ),
             },
             description="Apply a Gaussian blur.",
+            subcategory="Filter",
         )
 
     def configure(self, params: dict[str, Any]) -> None:
