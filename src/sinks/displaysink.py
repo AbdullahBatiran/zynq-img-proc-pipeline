@@ -57,6 +57,12 @@ class DisplaySink(Sink):
                     default=False,
                     description="Stretch each frame to the dtype display range.",
                 ),
+                "depth": ParameterContract(
+                    "depth",
+                    "int",
+                    default=None,
+                    description="Active input bits to scale into the dtype display range.",
+                ),
                 "quit_key": ParameterContract(
                     "quit_key",
                     "str",
@@ -77,6 +83,11 @@ class DisplaySink(Sink):
         self.sync = bool(params.get("sync", True))
         self.enabled = bool(params.get("enabled", True))
         self.autorange = bool(params.get("autorange", False))
+        self.depth = int(params["depth"]) if params.get("depth") is not None else None
+        if self.depth is not None and self.depth <= 0:
+            raise ValueError("displaysink depth must be a positive integer")
+        if self.depth is not None and self.autorange:
+            raise ValueError("displaysink depth cannot be combined with autorange")
         self.quit_key = str(params.get("quit_key", "q"))
         self.context: PipelineContext | None = None
 
@@ -108,23 +119,22 @@ class DisplaySink(Sink):
         return 1
 
     def _display_frame(self, frame: np.ndarray) -> np.ndarray:
-        if not self.autorange:
+        if not self.autorange and self.depth is None:
             return frame
         if frame.size == 0:
             return frame
 
-        input_min = float(np.min(frame))
-        input_max = float(np.max(frame))
-        if input_min >= input_max:
-            return np.zeros_like(frame)
-
         output_min, output_max = _display_range_for_dtype(frame.dtype)
-        scaled = (
-            (frame.astype(np.float64) - input_min)
-            * (output_max - output_min)
-            / (input_max - input_min)
-            + output_min
-        )
+        if self.depth is not None:
+            input_min = 0.0
+            input_max = float(_input_max_for_depth(frame.dtype, self.depth))
+        else:
+            input_min = float(np.min(frame))
+            input_max = float(np.max(frame))
+            if input_min >= input_max:
+                return np.zeros_like(frame)
+
+        scaled = _scale_frame(frame, input_min, input_max, output_min, output_max)
         scaled = np.clip(scaled, output_min, output_max)
         if np.issubdtype(frame.dtype, np.integer):
             scaled = np.rint(scaled)
@@ -136,3 +146,27 @@ def _display_range_for_dtype(dtype: np.dtype) -> tuple[float, float]:
         info = np.iinfo(dtype)
         return float(info.min), float(info.max)
     return 0.0, 1.0
+
+
+def _input_max_for_depth(dtype: np.dtype, depth: int) -> int:
+    if not np.issubdtype(dtype, np.integer):
+        raise ValueError("displaysink depth scaling supports only integer frames")
+    container_bits = np.iinfo(dtype).bits
+    if depth > container_bits:
+        raise ValueError("displaysink depth cannot exceed frame container depth")
+    return (1 << depth) - 1
+
+
+def _scale_frame(
+    frame: np.ndarray,
+    input_min: float,
+    input_max: float,
+    output_min: float,
+    output_max: float,
+) -> np.ndarray:
+    return (
+        (frame.astype(np.float64) - input_min)
+        * (output_max - output_min)
+        / (input_max - input_min)
+        + output_min
+    )

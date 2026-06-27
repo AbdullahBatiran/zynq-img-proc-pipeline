@@ -636,6 +636,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Element: displaysink", output)
         self.assertIn("autorange: bool | optional | default=False", output)
+        self.assertIn("depth: int | optional", output)
 
     def test_cli_describe_unknown_element_returns_error(self) -> None:
         stderr = io.StringIO()
@@ -685,6 +686,26 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(shown.dtype, np.uint16)
         self.assertEqual(shown.tolist(), [[0, 65535]])
         self.assertEqual(frame.data.tolist(), [[100, 200]])
+
+    def test_displaysink_depth_scales_active_bits_to_display_range(self) -> None:
+        sink = DisplaySink("display", {"enabled": False, "depth": 14})
+        frame = np.array([[0, 8192, 16383, 20000]], dtype=np.uint16)
+
+        result = sink._display_frame(frame)
+
+        self.assertEqual(result.dtype, np.uint16)
+        self.assertEqual(result.tolist(), [[0, 32770, 65535, 65535]])
+        self.assertEqual(frame.tolist(), [[0, 8192, 16383, 20000]])
+
+    def test_displaysink_depth_rejects_invalid_configuration(self) -> None:
+        with self.assertRaises(ValueError):
+            DisplaySink("display", {"depth": 14, "autorange": True})
+        with self.assertRaises(ValueError):
+            DisplaySink("display", {"depth": 0})
+        with self.assertRaises(ValueError):
+            DisplaySink("display", {"depth": 9})._display_frame(
+                np.zeros((1, 1), dtype=np.uint8)
+            )
 
     def test_displaysink_q_requests_pipeline_stop(self) -> None:
         frame = packet(np.zeros((4, 5, 3), dtype=np.uint8))
