@@ -38,6 +38,9 @@ class Element:
     def configure(self, params: dict[str, Any]) -> None:
         self.params = dict(params)
 
+    def configure_connected_output_ports(self, ports: set[str]) -> None:
+        pass
+
     def start(self, context: PipelineContext) -> None:
         pass
 

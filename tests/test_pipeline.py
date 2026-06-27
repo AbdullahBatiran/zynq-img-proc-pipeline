@@ -23,6 +23,7 @@ from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
 from src.transformers.bilateral import Bilateral
 from src.transformers.combine import Combine
 from src.transformers.debug import Debug
+from src.transformers.fan_out import FanOut
 from src.transformers.gaussian import Gaussian
 from src.transformers.hist_equalize import HistEqualize
 from src.transformers.laplacian_sharp import LaplacianSharp
@@ -765,6 +766,34 @@ class PipelineTests(unittest.TestCase):
                 {"in4": packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")}
             )
 
+    def test_fan_out_replicates_packet_to_requested_outputs(self) -> None:
+        source = packet(np.zeros((4, 5), dtype=np.uint8), fmt="gray")
+        transform = FanOut("f", {"outputs": 3})
+        result = transform.process({"in": source})
+
+        self.assertEqual(set(result), {"out0", "out1", "out2"})
+        self.assertIs(result["out0"][0], source)
+        self.assertIs(result["out1"][0], source)
+        self.assertIs(result["out2"][0], source)
+
+    def test_fan_out_uses_connected_dynamic_outputs(self) -> None:
+        source = packet(np.zeros((4, 5), dtype=np.uint8), fmt="gray")
+        transform = FanOut("f", {})
+        transform.configure_connected_output_ports({"out2", "out0"})
+        result = transform.process({"in": source})
+
+        self.assertEqual(list(result), ["out0", "out2"])
+        self.assertIs(result["out0"][0], source)
+        self.assertIs(result["out2"][0], source)
+
+    def test_fan_out_rejects_invalid_params_and_ports(self) -> None:
+        with self.assertRaises(ValueError):
+            FanOut("f", {"outputs": 0})
+        with self.assertRaises(ValueError):
+            FanOut("f", {}).configure_connected_output_ports({"output0"})
+        with self.assertRaises(ValueError):
+            FanOut("f", {"outputs": 2}).configure_connected_output_ports({"out2"})
+
     def test_cli_parser_linear(self) -> None:
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! resize width=4 height=4 ! filesink path=out.mp4"
@@ -839,6 +868,19 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue({"a", "b", "ra", "rb", "c", "filesink"}.issubset(ids))
         self.assertIn(ConnectionSpec("rb", "out", "c", "in1"), spec.connections)
 
+    def test_cli_parser_named_fan_out_branches(self) -> None:
+        spec = parse_pipeline_expression(
+            """
+            filesrc name=src path=in.mp4 ! fan-out name=f
+            f.out0 ! debug name=a enabled=false
+            f.out1 ! debug name=b enabled=false
+            """
+        )
+        ids = {element.id for element in spec.elements}
+        self.assertTrue({"src", "f", "a", "b"}.issubset(ids))
+        self.assertIn(ConnectionSpec("f", "out0", "a", "in"), spec.connections)
+        self.assertIn(ConnectionSpec("f", "out1", "b", "in"), spec.connections)
+
     def test_pipeline_validation_accepts_dynamic_combine_ports(self) -> None:
         spec = PipelineSpec(
             elements=[
@@ -862,6 +904,43 @@ class PipelineTests(unittest.TestCase):
                 ElementSpec("combo", "combine", {"mode": "horizontal"}),
             ],
             connections=[ConnectionSpec("src_a", "out", "combo", "foo")],
+        )
+        with self.assertRaises(ValueError):
+            Pipeline.from_spec(spec)
+
+    def test_pipeline_validation_accepts_dynamic_fan_out_ports(self) -> None:
+        spec = PipelineSpec(
+            elements=[
+                ElementSpec("src", "filesrc", {"path": "a.mp4"}),
+                ElementSpec("fan", "fan-out", {}),
+                ElementSpec("first", "debug", {"enabled": False}),
+                ElementSpec("second", "debug", {"enabled": False}),
+                ElementSpec("out", "filesink", {"path": "out.mp4"}),
+            ],
+            connections=[
+                ConnectionSpec("src", "out", "fan", "in"),
+                ConnectionSpec("fan", "out0", "first", "in"),
+                ConnectionSpec("fan", "out1", "second", "in"),
+                ConnectionSpec("first", "out", "out", "in"),
+            ],
+        )
+        pipeline = Pipeline.from_spec(spec)
+        self.assertEqual(
+            pipeline.elements["fan"].connected_output_ports,
+            {"out0", "out1"},
+        )
+
+    def test_pipeline_validation_rejects_invalid_dynamic_fan_out_port(self) -> None:
+        spec = PipelineSpec(
+            elements=[
+                ElementSpec("src", "filesrc", {"path": "a.mp4"}),
+                ElementSpec("fan", "fan-out", {}),
+                ElementSpec("dbg", "debug", {"enabled": False}),
+            ],
+            connections=[
+                ConnectionSpec("src", "out", "fan", "in"),
+                ConnectionSpec("fan", "output0", "dbg", "in"),
+            ],
         )
         with self.assertRaises(ValueError):
             Pipeline.from_spec(spec)
@@ -957,6 +1036,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Name     Subcategory  Description", output)
         self.assertIn("filesrc  File         Read video frames", output)
         self.assertIn("combine          Compose", output)
+        self.assertIn("fan-out          Control", output)
         self.assertIn("hist_equalize    Contrast", output)
         self.assertIn("linear-scale     Contrast", output)
         self.assertIn("debug            Debug", output)
@@ -981,6 +1061,9 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertIn("* required", output)
         self.assertIn("Transformers\n  Compose\n    combine", output)
+        self.assertIn("  Control\n    fan-out", output)
+        self.assertIn("Outputs: outN", output)
+        self.assertIn("Parameters: outputs", output)
         self.assertIn("  Contrast\n    hist_equalize", output)
         self.assertIn("    linear-scale", output)
         self.assertIn("  Debug\n    debug", output)
@@ -1057,6 +1140,21 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("cols: int | optional", output)
         self.assertNotIn("overlay", output)
         self.assertNotIn("alpha", output)
+
+    def test_cli_describe_fan_out_shows_dynamic_outputs(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "fan-out"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: fan-out", output)
+        self.assertIn("Subcategory: Control", output)
+        self.assertIn("outputs: int | optional", output)
+        self.assertIn("Input ports:", output)
+        self.assertIn("in: FramePacket", output)
+        self.assertIn("Output ports:", output)
+        self.assertIn("outN: FramePacket", output)
 
     def test_cli_describe_filter_elements(self) -> None:
         expectations = {

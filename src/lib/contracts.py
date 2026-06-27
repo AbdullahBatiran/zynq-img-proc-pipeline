@@ -65,6 +65,7 @@ class ElementContract:
     input_ports: dict[str, PortContract] = field(default_factory=dict)
     dynamic_input_ports: dict[str, PortContract] = field(default_factory=dict)
     output_ports: dict[str, PortContract] = field(default_factory=dict)
+    dynamic_output_ports: dict[str, PortContract] = field(default_factory=dict)
     parameters: dict[str, ParameterContract] = field(default_factory=dict)
     description: str = ""
     subcategory: str | None = None
@@ -81,14 +82,24 @@ class ElementContract:
     def output_names(self) -> set[str]:
         return set(self.output_ports)
 
-    def input_contract(self, port_name: str) -> PortContract | None:
-        if port_name in self.input_ports:
-            return self.input_ports[port_name]
-        for prefix, port in self.dynamic_input_ports.items():
+    def _dynamic_contract(
+        self, port_name: str, ports: dict[str, PortContract]
+    ) -> PortContract | None:
+        for prefix, port in ports.items():
             suffix = port_name.removeprefix(prefix)
             if suffix != port_name and suffix.isdigit():
                 return port
         return None
+
+    def input_contract(self, port_name: str) -> PortContract | None:
+        if port_name in self.input_ports:
+            return self.input_ports[port_name]
+        return self._dynamic_contract(port_name, self.dynamic_input_ports)
+
+    def output_contract(self, port_name: str) -> PortContract | None:
+        if port_name in self.output_ports:
+            return self.output_ports[port_name]
+        return self._dynamic_contract(port_name, self.dynamic_output_ports)
 
     def dynamic_input_names(self, connected_ports: set[str]) -> set[str]:
         return {

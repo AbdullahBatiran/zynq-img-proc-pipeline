@@ -46,6 +46,7 @@ class Pipeline:
         self.elements: dict[str, Element] = {}
         self.adjacency: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
         self.incoming_ports: dict[str, set[str]] = defaultdict(set)
+        self.outgoing_ports: dict[str, set[str]] = defaultdict(set)
 
     @classmethod
     def from_spec(
@@ -74,6 +75,11 @@ class Pipeline:
                 (connection.to_element, connection.to_port)
             )
             self.incoming_ports[connection.to_element].add(connection.to_port)
+            self.outgoing_ports[connection.from_element].add(connection.from_port)
+        for element_id, element in self.elements.items():
+            element.configure_connected_output_ports(
+                set(self.outgoing_ports.get(element_id, set()))
+            )
 
     def validate(self) -> None:
         if not self.elements:
@@ -87,7 +93,8 @@ class Pipeline:
 
             source_contract = self.elements[connection.from_element].contract()
             target_contract = self.elements[connection.to_element].contract()
-            if connection.from_port not in source_contract.output_ports:
+            source_port = source_contract.output_contract(connection.from_port)
+            if source_port is None:
                 raise ValueError(
                     f"Element {connection.from_element!r} has no output port "
                     f"{connection.from_port!r}"
@@ -99,7 +106,7 @@ class Pipeline:
                     f"{connection.to_port!r}"
                 )
 
-            out_port = source_contract.output_ports[connection.from_port]
+            out_port = source_port
             in_port = target_port
             if in_port.formats is not None and out_port.formats is not None:
                 if not in_port.formats.intersection(out_port.formats):
@@ -241,9 +248,9 @@ class Pipeline:
         for port_name, packets in outputs.items():
             validate_packets_are_frame_packets(packets)
             contract = self.elements[element_id].contract()
-            if port_name not in contract.output_ports:
+            output_port = contract.output_contract(port_name)
+            if output_port is None:
                 raise ValueError(f"{element_id!r} has no output port {port_name!r}")
-            output_port = contract.output_ports[port_name]
             for packet in packets:
                 output_port.validate_packet(packet)
             for target_element, target_port in self.adjacency.get(

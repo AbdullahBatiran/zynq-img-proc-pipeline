@@ -56,6 +56,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.bilateral import Bilateral
     from src.transformers.combine import Combine
     from src.transformers.debug import Debug
+    from src.transformers.fan_out import FanOut
     from src.transformers.gaussian import Gaussian
     from src.transformers.hist_equalize import HistEqualize
     from src.transformers.laplacian_sharp import LaplacianSharp
@@ -75,6 +76,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Bilateral,
         LaplacianSharp,
         Debug,
+        FanOut,
         Combine,
         FileSink,
         DisplaySink,

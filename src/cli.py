@@ -258,7 +258,7 @@ def _format_verbose_element(
     lines.extend(
         _format_wrapped_field(
             "Outputs",
-            ", ".join(contract.output_ports) or "none",
+            ", ".join(_output_names(contract)),
             indent=field_indent,
         )
     )
@@ -277,6 +277,12 @@ def _format_verbose_element(
 def _input_names(contract: ElementContract) -> list[str]:
     names = list(contract.input_ports)
     names.extend(f"{prefix}N" for prefix in contract.dynamic_input_ports)
+    return names or ["none"]
+
+
+def _output_names(contract: ElementContract) -> list[str]:
+    names = list(contract.output_ports)
+    names.extend(f"{prefix}N" for prefix in contract.dynamic_output_ports)
     return names or ["none"]
 
 
@@ -315,7 +321,7 @@ def _format_element_description(name: str, contract: ElementContract) -> str:
     lines.extend(["", "Input ports:"])
     lines.extend(_format_input_ports(contract))
     lines.extend(["", "Output ports:"])
-    lines.extend(_format_ports(contract.output_ports))
+    lines.extend(_format_output_ports(contract))
 
     rules = _format_rules(contract)
     if rules:
@@ -355,6 +361,21 @@ def _format_ports(ports: dict[str, PortContract]) -> list[str]:
 def _format_input_ports(contract: ElementContract) -> list[str]:
     lines = _format_ports(contract.input_ports) if contract.input_ports else []
     for prefix, port in contract.dynamic_input_ports.items():
+        constraints: list[str] = []
+        if port.formats is not None:
+            constraints.append(f"formats=[{', '.join(sorted(port.formats))}]")
+        if port.depths is not None:
+            constraints.append(
+                f"depths=[{', '.join(str(depth) for depth in sorted(port.depths))}]"
+            )
+        suffix = f" | {'; '.join(constraints)}" if constraints else ""
+        lines.append(f"  {prefix}N: {port.packet_type.__name__}{suffix}")
+    return lines or ["  none"]
+
+
+def _format_output_ports(contract: ElementContract) -> list[str]:
+    lines = _format_ports(contract.output_ports) if contract.output_ports else []
+    for prefix, port in contract.dynamic_output_ports.items():
         constraints: list[str] = []
         if port.formats is not None:
             constraints.append(f"formats=[{', '.join(sorted(port.formats))}]")
