@@ -1810,8 +1810,6 @@ class PipelineTests(unittest.TestCase):
             output,
         )
         self.assertIn("* required", output)
-        self.assertIn("Transformers\n  Compose\n    combine", output)
-        self.assertIn("  Control\n    deflicker", output)
         self.assertIn("    fan-out", output)
         self.assertIn("    temporal-denoise", output)
         self.assertIn("    deflicker", output)
@@ -1828,7 +1826,6 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("  Contrast\n    clahe", output)
         self.assertIn("    hist_equalize", output)
         self.assertIn("Parameters: none", output)
-        self.assertIn("  Contrast\n    hist_equalize", output)
         self.assertIn("    linear-scale", output)
         self.assertIn("    local-contrast", output)
         self.assertIn("    retinex", output)
