@@ -63,6 +63,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.linear_scale import LinearScale
     from src.transformers.median import Median
     from src.transformers.resize import Resize
+    from src.transformers.text_overlay import TextOverlay
     from src.transformers.unsharp import Unsharp
 
     for element_cls in (
@@ -78,6 +79,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Debug,
         FanOut,
         Combine,
+        TextOverlay,
         FileSink,
         DisplaySink,
     ):

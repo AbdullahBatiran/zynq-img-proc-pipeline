@@ -30,6 +30,7 @@ from src.transformers.laplacian_sharp import LaplacianSharp
 from src.transformers.linear_scale import LinearScale
 from src.transformers.median import Median
 from src.transformers.resize import Resize
+from src.transformers.text_overlay import TextOverlay
 from src.transformers.unsharp import Unsharp
 
 
@@ -59,6 +60,16 @@ def packet(
             channels=channels,
         ),
     )
+
+
+def _changed_center(data: np.ndarray) -> tuple[int, int]:
+    mask = np.any(data != 0, axis=2) if data.ndim == 3 else data != 0
+    coords = np.argwhere(mask)
+    if coords.size == 0:
+        raise AssertionError("frame has no changed pixels")
+    min_y, min_x = coords.min(axis=0)
+    max_y, max_x = coords.max(axis=0)
+    return ((int(min_x) + int(max_x)) // 2, (int(min_y) + int(max_y)) // 2)
 
 
 class PipelineTests(unittest.TestCase):
@@ -766,6 +777,132 @@ class PipelineTests(unittest.TestCase):
                 {"in4": packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")}
             )
 
+    def test_text_overlay_draws_bgr_text_and_preserves_metadata(self) -> None:
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        source = packet(frame)
+        transform = TextOverlay(
+            "txt",
+            {
+                "text": "A",
+                "color": "red",
+                "position": "top-left",
+                "line-type": "8",
+                "thickness": 2,
+            },
+        )
+
+        result = transform.process({"in": source})["out"][0]
+
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.metadata.width, source.metadata.width)
+        self.assertEqual(result.metadata.height, source.metadata.height)
+        self.assertEqual(result.metadata.format, "bgr")
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+        self.assertEqual(result.metadata.extra["text_overlay_by"], "txt")
+        self.assertEqual(result.metadata.extra["text_overlay_text"], "A")
+        self.assertEqual(result.metadata.extra["text_overlay_color"], (255, 0, 0))
+        self.assertGreater(int(result.data[:, :, 2].max()), 0)
+        self.assertEqual(int(result.data[:, :, 0].max()), 0)
+        self.assertEqual(int(result.data[:, :, 1].max()), 0)
+        self.assertEqual(int(source.data.max()), 0)
+
+    def test_text_overlay_handles_gray_rgb_and_bgr_color_ordering(self) -> None:
+        params = {
+            "text": "I",
+            "color": "red",
+            "position": "top-left",
+            "line-type": "8",
+            "thickness": 2,
+        }
+
+        gray = TextOverlay("txt", params).process(
+            {"in": packet(np.zeros((60, 80), dtype=np.uint8), fmt="gray")}
+        )["out"][0]
+        bgr = TextOverlay("txt", params).process(
+            {"in": packet(np.zeros((60, 80, 3), dtype=np.uint8), fmt="bgr")}
+        )["out"][0]
+        rgb = TextOverlay("txt", params).process(
+            {"in": packet(np.zeros((60, 80, 3), dtype=np.uint8), fmt="rgb")}
+        )["out"][0]
+
+        self.assertEqual(int(gray.data.max()), 76)
+        self.assertGreater(int(bgr.data[:, :, 2].max()), 0)
+        self.assertEqual(int(bgr.data[:, :, 0].max()), 0)
+        self.assertGreater(int(rgb.data[:, :, 0].max()), 0)
+        self.assertEqual(int(rgb.data[:, :, 2].max()), 0)
+
+    def test_text_overlay_scales_uint16_colors(self) -> None:
+        transform = TextOverlay(
+            "txt",
+            {
+                "text": "A",
+                "color": "#00FF00",
+                "position": "top-left",
+                "line-type": "8",
+            },
+        )
+        source = packet(np.zeros((80, 160, 3), dtype=np.uint16), fmt="bgr")
+
+        result = transform.process({"in": source})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertEqual(int(result.data[:, :, 1].max()), 65535)
+        self.assertEqual(int(result.data[:, :, 0].max()), 0)
+        self.assertEqual(int(result.data[:, :, 2].max()), 0)
+
+    def test_text_overlay_anchor_positions(self) -> None:
+        cases = {
+            "top-left": (0, 45, 0, 45),
+            "center": (55, 105, 35, 85),
+            "bottom-right": (115, 159, 80, 119),
+        }
+        for position, (min_x, max_x, min_y, max_y) in cases.items():
+            with self.subTest(position=position):
+                transform = TextOverlay(
+                    "txt",
+                    {
+                        "text": "A",
+                        "position": position,
+                        "line-type": "8",
+                    },
+                )
+                result = transform.process(
+                    {"in": packet(np.zeros((120, 160), dtype=np.uint8), fmt="gray")}
+                )["out"][0]
+                center_x, center_y = _changed_center(result.data)
+
+                self.assertGreaterEqual(center_x, min_x)
+                self.assertLessEqual(center_x, max_x)
+                self.assertGreaterEqual(center_y, min_y)
+                self.assertLessEqual(center_y, max_y)
+
+    def test_text_overlay_rejects_invalid_parameters_and_frames(self) -> None:
+        invalid_params = [
+            {"text": ""},
+            {"text": "A", "color": "wrong"},
+            {"text": "A", "color": "256,0,0"},
+            {"text": "A", "position": "corner"},
+            {"text": "A", "font-size": 0},
+            {"text": "A", "thickness": 0},
+            {"text": "A", "font": "truetype"},
+            {"text": "A", "line-type": "16"},
+        ]
+        for params in invalid_params:
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                TextOverlay("txt", params)
+
+        transform = TextOverlay("txt", {"text": "A"})
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((8, 8), dtype=np.float32), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((8, 8, 4), dtype=np.uint8), fmt="rgba")}
+            )
+
     def test_fan_out_replicates_packet_to_requested_outputs(self) -> None:
         source = packet(np.zeros((4, 5), dtype=np.uint8), fmt="gray")
         transform = FanOut("f", {"outputs": 3})
@@ -853,6 +990,17 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[4].type, "laplacian-sharp")
         self.assertEqual(spec.elements[4].params["kernel-size"], 3)
         self.assertEqual(spec.elements[4].params["iterations"], 2)
+
+    def test_cli_parser_accepts_text_overlay_quoted_text(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mp4 ! text-overlay text='Frame 1' color=red "
+            "position=bottom-right font-size=0.8 ! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "text-overlay")
+        self.assertEqual(spec.elements[1].params["text"], "Frame 1")
+        self.assertEqual(spec.elements[1].params["position"], "bottom-right")
+        self.assertEqual(spec.elements[1].params["font-size"], 0.8)
 
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
@@ -1036,6 +1184,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Name     Subcategory  Description", output)
         self.assertIn("filesrc  File         Read video frames", output)
         self.assertIn("combine          Compose", output)
+        self.assertIn("text-overlay     Compose", output)
         self.assertIn("fan-out          Control", output)
         self.assertIn("hist_equalize    Contrast", output)
         self.assertIn("linear-scale     Contrast", output)
@@ -1061,6 +1210,8 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertIn("* required", output)
         self.assertIn("Transformers\n  Compose\n    combine", output)
+        self.assertIn("    text-overlay", output)
+        self.assertIn("Parameters: text*, color, position, x, y, font-size", output)
         self.assertIn("  Control\n    fan-out", output)
         self.assertIn("Outputs: outN", output)
         self.assertIn("Parameters: outputs", output)
@@ -1140,6 +1291,20 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("cols: int | optional", output)
         self.assertNotIn("overlay", output)
         self.assertNotIn("alpha", output)
+
+    def test_cli_describe_text_overlay_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "text-overlay"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: text-overlay", output)
+        self.assertIn("Subcategory: Compose", output)
+        self.assertIn("text: str | required", output)
+        self.assertIn("font-size: float | optional", output)
+        self.assertIn("line-type: str | optional", output)
+        self.assertIn("formats=[bgr, gray, rgb]", output)
 
     def test_cli_describe_fan_out_shows_dynamic_outputs(self) -> None:
         stdout = io.StringIO()
