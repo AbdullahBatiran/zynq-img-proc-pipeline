@@ -53,6 +53,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.sinks.displaysink import DisplaySink
     from src.sinks.filesink import FileSink
     from src.sources.filesrc import FileSource
+    from src.transformers.bit_shift import BitShift
     from src.transformers.bilateral import Bilateral
     from src.transformers.combine import Combine
     from src.transformers.debug import Debug
@@ -62,12 +63,14 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.laplacian_sharp import LaplacianSharp
     from src.transformers.linear_scale import LinearScale
     from src.transformers.median import Median
+    from src.transformers.mono_to_color import MonoToColor
     from src.transformers.resize import Resize
     from src.transformers.text_overlay import TextOverlay
     from src.transformers.unsharp import Unsharp
 
     for element_cls in (
         FileSource,
+        BitShift,
         Resize,
         HistEqualize,
         LinearScale,
@@ -79,6 +82,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Debug,
         FanOut,
         Combine,
+        MonoToColor,
         TextOverlay,
         FileSink,
         DisplaySink,

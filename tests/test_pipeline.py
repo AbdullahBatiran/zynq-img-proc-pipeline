@@ -20,6 +20,7 @@ from src.lib.pipeline import ConnectionSpec, ElementSpec, Pipeline, PipelineSpec
 from src.lib.registry import register_builtin_elements
 from src.sinks.displaysink import DisplaySink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
+from src.transformers.bit_shift import BitShift
 from src.transformers.bilateral import Bilateral
 from src.transformers.combine import Combine
 from src.transformers.debug import Debug
@@ -29,6 +30,7 @@ from src.transformers.hist_equalize import HistEqualize
 from src.transformers.laplacian_sharp import LaplacianSharp
 from src.transformers.linear_scale import LinearScale
 from src.transformers.median import Median
+from src.transformers.mono_to_color import MonoToColor
 from src.transformers.resize import Resize
 from src.transformers.text_overlay import TextOverlay
 from src.transformers.unsharp import Unsharp
@@ -777,6 +779,134 @@ class PipelineTests(unittest.TestCase):
                 {"in4": packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")}
             )
 
+    def test_bit_shift_right_uint8_gray(self) -> None:
+        frame = np.array([[0, 1, 2, 4], [8, 16, 32, 255]], dtype=np.uint8)
+        source = packet(frame, fmt="gray")
+        result = BitShift("shift", {"bits": 2}).process({"in": source})["out"][0]
+
+        self.assertEqual(result.data.tolist(), [[0, 0, 0, 1], [2, 4, 8, 63]])
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.metadata.format, "gray")
+        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.extra["bit_shifted_by"], "shift")
+        self.assertEqual(result.metadata.extra["bit_shift_bits"], 2)
+        self.assertEqual(result.metadata.extra["bit_shift_direction"], "right")
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_bit_shift_left_uint8_wraps_like_numpy(self) -> None:
+        frame = np.array([[1, 64, 128, 255]], dtype=np.uint8)
+        result = BitShift("shift", {"bits": 1, "direction": "left"}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.data.tolist(), np.left_shift(frame, 1).tolist())
+        self.assertEqual(int(result.data[0, 2]), 0)
+        self.assertEqual(int(result.data[0, 3]), 254)
+
+    def test_bit_shift_uint16_color_preserves_shape_dtype_and_depth(self) -> None:
+        frame = np.array(
+            [[[1, 2, 4], [8, 16, 32]], [[64, 128, 256], [512, 1024, 2048]]],
+            dtype=np.uint16,
+        )
+        source = packet(frame, fmt="rgb")
+        result = BitShift("shift", {"bits": 3, "direction": "left"}).process(
+            {"in": source}
+        )["out"][0]
+
+        self.assertEqual(result.data.tolist(), np.left_shift(frame, 3).tolist())
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.format, "rgb")
+        self.assertEqual(result.metadata.channels, 3)
+        self.assertEqual(result.metadata.depth, 16)
+
+    def test_bit_shift_zero_bits_derives_equivalent_packet(self) -> None:
+        source = packet(np.array([[1, 2], [3, 4]], dtype=np.uint8), fmt="gray")
+        result = BitShift("shift", {"bits": 0}).process({"in": source})["out"][0]
+
+        np.testing.assert_array_equal(result.data, source.data)
+        self.assertIsNot(result, source)
+        self.assertNotEqual(result.metadata.packet_id, source.metadata.packet_id)
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_bit_shift_rejects_invalid_parameters_and_frames(self) -> None:
+        for params in ({"bits": -1}, {"bits": 1, "direction": "up"}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                BitShift("shift", params)
+
+        transform = BitShift("shift", {"bits": 1})
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2), dtype=np.float32), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2), dtype=np.uint8), fmt="mono")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2, 4), dtype=np.uint8), fmt="rgb")}
+            )
+
+    def test_mono_to_color_defaults_to_bgr_from_2d_gray(self) -> None:
+        frame = np.array([[1, 2], [3, 4]], dtype=np.uint8)
+        source = packet(frame, fmt="gray")
+        result = MonoToColor("color", {}).process({"in": source})["out"][0]
+
+        expected = np.repeat(frame[:, :, np.newaxis], 3, axis=2)
+        np.testing.assert_array_equal(result.data, expected)
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.metadata.format, "bgr")
+        self.assertEqual(result.metadata.channels, 3)
+        self.assertEqual(result.metadata.width, 2)
+        self.assertEqual(result.metadata.height, 2)
+        self.assertEqual(result.metadata.extra["mono_to_color_by"], "color")
+        self.assertEqual(result.metadata.extra["mono_to_color_format"], "bgr")
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_mono_to_color_supports_rgb_and_hxwx1_input(self) -> None:
+        frame = np.array([[[1], [2]], [[3], [4]]], dtype=np.uint8)
+        result = MonoToColor("color", {"format": "rgb"}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.metadata.format, "rgb")
+        self.assertEqual(result.metadata.channels, 3)
+        self.assertEqual(result.data.tolist(), [
+            [[1, 1, 1], [2, 2, 2]],
+            [[3, 3, 3], [4, 4, 4]],
+        ])
+
+    def test_mono_to_color_preserves_uint16_values(self) -> None:
+        frame = np.array([[0, 1024], [4096, 65535]], dtype=np.uint16)
+        result = MonoToColor("color", {}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
+        np.testing.assert_array_equal(result.data[:, :, 0], frame)
+        np.testing.assert_array_equal(result.data[:, :, 1], frame)
+        np.testing.assert_array_equal(result.data[:, :, 2], frame)
+
+    def test_mono_to_color_rejects_invalid_parameters_and_frames(self) -> None:
+        with self.assertRaises(ValueError):
+            MonoToColor("color", {"format": "gray"})
+
+        transform = MonoToColor("color", {})
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2, 3), dtype=np.uint8), fmt="bgr")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2, 3), dtype=np.uint8), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2), dtype=np.float32), fmt="gray")}
+            )
+
     def test_text_overlay_draws_bgr_text_and_preserves_metadata(self) -> None:
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         source = packet(frame)
@@ -1002,6 +1132,18 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[1].params["position"], "bottom-right")
         self.assertEqual(spec.elements[1].params["font-size"], 0.8)
 
+    def test_cli_parser_accepts_bit_shift_and_mono_to_color(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mkv ! bit-shift bits=2 direction=left "
+            "! mono-to-color format=rgb ! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "bit-shift")
+        self.assertEqual(spec.elements[1].params["bits"], 2)
+        self.assertEqual(spec.elements[1].params["direction"], "left")
+        self.assertEqual(spec.elements[2].type, "mono-to-color")
+        self.assertEqual(spec.elements[2].params["format"], "rgb")
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -1185,12 +1327,14 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("filesrc  File         Read video frames", output)
         self.assertIn("combine          Compose", output)
         self.assertIn("text-overlay     Compose", output)
+        self.assertIn("mono-to-color    Color", output)
         self.assertIn("fan-out          Control", output)
         self.assertIn("hist_equalize    Contrast", output)
         self.assertIn("linear-scale     Contrast", output)
         self.assertIn("debug            Debug", output)
         self.assertIn("bilateral        Filter", output)
         self.assertIn("resize           Geometry", output)
+        self.assertIn("bit-shift        Intensity", output)
         self.assertIn("filesink     File", output)
         self.assertIn("displaysink  GUI", output)
 
@@ -1209,9 +1353,12 @@ class PipelineTests(unittest.TestCase):
             output,
         )
         self.assertIn("* required", output)
-        self.assertIn("Transformers\n  Compose\n    combine", output)
+        self.assertIn("Transformers", output)
+        self.assertIn("  Compose\n    combine", output)
         self.assertIn("    text-overlay", output)
         self.assertIn("Parameters: text*, color, position, x, y, font-size", output)
+        self.assertIn("  Color\n    mono-to-color", output)
+        self.assertIn("Parameters: format", output)
         self.assertIn("  Control\n    fan-out", output)
         self.assertIn("Outputs: outN", output)
         self.assertIn("Parameters: outputs", output)
@@ -1236,6 +1383,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("    median", output)
         self.assertIn("    unsharp", output)
         self.assertIn("  Geometry\n    resize", output)
+        self.assertIn("  Intensity\n    bit-shift", output)
+        self.assertIn("Parameters: bits*, direction", output)
         self.assertIn("Sinks\n  File\n    filesink", output)
         self.assertIn("  GUI\n    displaysink", output)
 
@@ -1305,6 +1454,34 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("font-size: float | optional", output)
         self.assertIn("line-type: str | optional", output)
         self.assertIn("formats=[bgr, gray, rgb]", output)
+
+    def test_cli_describe_bit_shift_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "bit-shift"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: bit-shift", output)
+        self.assertIn("Subcategory: Intensity", output)
+        self.assertIn("bits: int | required", output)
+        self.assertIn("direction: str | optional", output)
+        self.assertIn("choices=[left, right]", output)
+        self.assertIn("formats=[bgr, gray, rgb]", output)
+
+    def test_cli_describe_mono_to_color_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "mono-to-color"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: mono-to-color", output)
+        self.assertIn("Subcategory: Color", output)
+        self.assertIn("format: str | optional", output)
+        self.assertIn("choices=[bgr, rgb]", output)
+        self.assertIn("formats=[gray]", output)
+        self.assertIn("formats=[bgr, rgb]", output)
 
     def test_cli_describe_fan_out_shows_dynamic_outputs(self) -> None:
         stdout = io.StringIO()
