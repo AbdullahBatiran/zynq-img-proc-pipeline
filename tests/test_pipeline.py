@@ -29,6 +29,7 @@ from src.transformers.dtype_convert import DtypeConvert
 from src.transformers.fan_out import FanOut
 from src.transformers.gaussian import Gaussian
 from src.transformers.hist_equalize import HistEqualize
+from src.transformers.interlace_mimic_test import InterlaceMimicTest
 from src.transformers.laplacian_sharp import LaplacianSharp
 from src.transformers.linear_scale import LinearScale
 from src.transformers.median import Median
@@ -1005,6 +1006,118 @@ class PipelineTests(unittest.TestCase):
         self.assertIs(result, source)
         self.assertEqual(transform.params, {})
 
+    def test_interlace_mimic_test_emits_one_frame_per_two_inputs(self) -> None:
+        transform = InterlaceMimicTest("interlace", {})
+        first = packet(np.full((4, 3), 1, dtype=np.uint8), fmt="gray", index=10)
+        second = packet(np.full((4, 3), 2, dtype=np.uint8), fmt="gray", index=11)
+
+        first_result = transform.process({"in": first})
+        second_result = transform.process({"in": second})
+
+        self.assertEqual(first_result, {})
+        result = second_result["out"][0]
+        self.assertEqual(result.data.tolist(), [
+            [1, 1, 1],
+            [2, 2, 2],
+            [1, 1, 1],
+            [2, 2, 2],
+        ])
+        self.assertIsNot(result, first)
+        self.assertEqual(result.metadata.index, 0)
+        self.assertEqual(result.metadata.pts, first.metadata.pts)
+        self.assertEqual(result.metadata.fps, 15.0)
+        self.assertIn(first.metadata.packet_id, result.metadata.parents)
+        self.assertIn(second.metadata.packet_id, result.metadata.parents)
+        self.assertEqual(
+            result.metadata.extra["interlace_mimic_test_by"],
+            "interlace",
+        )
+        self.assertEqual(result.metadata.extra["interlace_mimic_pair_index"], 0)
+        self.assertEqual(result.metadata.extra["interlace_mimic_first_index"], 10)
+        self.assertEqual(result.metadata.extra["interlace_mimic_second_index"], 11)
+        self.assertEqual(
+            result.metadata.extra["interlace_mimic_line_order"],
+            "first_rows_0_even_second_rows_1_odd",
+        )
+
+    def test_interlace_mimic_test_odd_height_and_next_pair(self) -> None:
+        transform = InterlaceMimicTest("interlace", {})
+        first = packet(np.full((5, 2), 10, dtype=np.uint8), fmt="gray")
+        second = packet(np.full((5, 2), 20, dtype=np.uint8), fmt="gray")
+        third = packet(np.full((5, 2), 30, dtype=np.uint8), fmt="gray")
+        fourth = packet(np.full((5, 2), 40, dtype=np.uint8), fmt="gray")
+
+        first_pair = transform.process({"in": first})
+        first_pair = transform.process({"in": second})["out"][0]
+        third_result = transform.process({"in": third})
+        second_pair = transform.process({"in": fourth})["out"][0]
+
+        self.assertEqual(first_pair.data.tolist(), [
+            [10, 10],
+            [20, 20],
+            [10, 10],
+            [20, 20],
+            [10, 10],
+        ])
+        self.assertEqual(third_result, {})
+        self.assertEqual(second_pair.data.tolist(), [
+            [30, 30],
+            [40, 40],
+            [30, 30],
+            [40, 40],
+            [30, 30],
+        ])
+        self.assertEqual(second_pair.metadata.index, 1)
+        self.assertEqual(
+            second_pair.metadata.extra["interlace_mimic_pair_index"],
+            1,
+        )
+
+    def test_interlace_mimic_test_stop_drops_unmatched_frame(self) -> None:
+        transform = InterlaceMimicTest("interlace", {})
+        orphan = packet(np.full((2, 2), 1, dtype=np.uint8), fmt="gray")
+        first = packet(np.full((2, 2), 2, dtype=np.uint8), fmt="gray")
+        second = packet(np.full((2, 2), 3, dtype=np.uint8), fmt="gray")
+
+        self.assertEqual(transform.process({"in": orphan}), {})
+        transform.stop()
+        self.assertEqual(transform.process({"in": first}), {})
+        result = transform.process({"in": second})["out"][0]
+
+        self.assertEqual(result.data.tolist(), [[2, 2], [3, 3]])
+
+    def test_interlace_mimic_test_rejects_mismatched_pairs(self) -> None:
+        cases = [
+            (
+                packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray"),
+                packet(np.zeros((3, 2), dtype=np.uint8), fmt="gray"),
+            ),
+            (
+                packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray"),
+                packet(np.zeros((2, 2), dtype=np.uint16), fmt="gray"),
+            ),
+            (
+                packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray"),
+                packet(np.zeros((2, 2), dtype=np.uint8), fmt="bgr"),
+            ),
+        ]
+        base = packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")
+        depth_mismatch = FramePacket(
+            data=base.data,
+            metadata=base.metadata.derive(depth=16),
+        )
+        channel_mismatch = FramePacket(
+            data=base.data,
+            metadata=base.metadata.derive(channels=2),
+        )
+        cases.extend([(base, depth_mismatch), (base, channel_mismatch)])
+
+        for first, second in cases:
+            with self.subTest(second=second.metadata), self.assertRaises(ValueError):
+                transform = InterlaceMimicTest("interlace", {})
+                transform.process({"in": first})
+                transform.process({"in": second})
+
     def test_text_overlay_draws_bgr_text_and_preserves_metadata(self) -> None:
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         source = packet(frame)
@@ -1258,6 +1371,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[1].type, "bypass")
         self.assertEqual(spec.elements[1].params, {})
 
+    def test_cli_parser_accepts_interlace_mimic_test(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mkv ! interlace-mimic-test ! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "interlace-mimic-test")
+        self.assertEqual(spec.elements[1].params, {})
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -1439,18 +1560,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Sinks", output)
         self.assertIn("Name     Subcategory  Description", output)
         self.assertIn("filesrc  File         Read video frames", output)
-        self.assertIn("combine          Compose", output)
-        self.assertIn("text-overlay     Compose", output)
-        self.assertIn("mono-to-color    Color", output)
-        self.assertIn("bypass           Control", output)
-        self.assertIn("fan-out          Control", output)
-        self.assertIn("hist_equalize    Contrast", output)
-        self.assertIn("linear-scale     Contrast", output)
-        self.assertIn("debug            Debug", output)
-        self.assertIn("bilateral        Filter", output)
-        self.assertIn("resize           Geometry", output)
-        self.assertIn("bit-shift        Intensity", output)
-        self.assertIn("dtype-convert    Intensity", output)
+        self.assertIn("combine               Compose", output)
+        self.assertIn("text-overlay          Compose", output)
+        self.assertIn("mono-to-color         Color", output)
+        self.assertIn("bypass                Control", output)
+        self.assertIn("fan-out               Control", output)
+        self.assertIn("hist_equalize         Contrast", output)
+        self.assertIn("linear-scale          Contrast", output)
+        self.assertIn("debug                 Debug", output)
+        self.assertIn("bilateral             Filter", output)
+        self.assertIn("resize                Geometry", output)
+        self.assertIn("bit-shift             Intensity", output)
+        self.assertIn("dtype-convert         Intensity", output)
+        self.assertIn("interlace-mimic-test  Test", output)
         self.assertIn("filesink     File", output)
         self.assertIn("displaysink  GUI", output)
 
@@ -1505,6 +1627,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Parameters: bits*, direction", output)
         self.assertIn("    dtype-convert", output)
         self.assertIn("Parameters: dtype*", output)
+        self.assertIn("  Test\n    interlace-mimic-test", output)
         self.assertIn("Sinks\n  File\n    filesink", output)
         self.assertIn("  GUI\n    displaysink", output)
 
@@ -1625,6 +1748,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Element: bypass", output)
         self.assertIn("Subcategory: Control", output)
+        self.assertIn("Parameters:\n  none", output)
+        self.assertIn("in: FramePacket", output)
+        self.assertIn("out: FramePacket", output)
+
+    def test_cli_describe_interlace_mimic_test_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "interlace-mimic-test"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: interlace-mimic-test", output)
+        self.assertIn("Subcategory: Test", output)
         self.assertIn("Parameters:\n  none", output)
         self.assertIn("in: FramePacket", output)
         self.assertIn("out: FramePacket", output)

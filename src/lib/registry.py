@@ -62,6 +62,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.fan_out import FanOut
     from src.transformers.gaussian import Gaussian
     from src.transformers.hist_equalize import HistEqualize
+    from src.transformers.interlace_mimic_test import InterlaceMimicTest
     from src.transformers.laplacian_sharp import LaplacianSharp
     from src.transformers.linear_scale import LinearScale
     from src.transformers.median import Median
@@ -84,6 +85,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         DtypeConvert,
         Bypass,
         Debug,
+        InterlaceMimicTest,
         FanOut,
         Combine,
         MonoToColor,
