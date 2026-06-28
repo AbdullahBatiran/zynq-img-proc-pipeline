@@ -22,6 +22,7 @@ from src.sinks.displaysink import DisplaySink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
 from src.transformers.bit_shift import BitShift
 from src.transformers.bilateral import Bilateral
+from src.transformers.bypass import Bypass
 from src.transformers.combine import Combine
 from src.transformers.debug import Debug
 from src.transformers.dtype_convert import DtypeConvert
@@ -995,6 +996,15 @@ class PipelineTests(unittest.TestCase):
                 {"in": packet(np.zeros((2, 2), dtype=np.float32), fmt="gray")}
             )
 
+    def test_bypass_passes_same_packet_without_parameters(self) -> None:
+        transform = Bypass("bypass", {})
+        source = packet(np.zeros((2, 2), dtype=np.uint32), fmt="custom")
+
+        result = transform.process({"in": source})["out"][0]
+
+        self.assertIs(result, source)
+        self.assertEqual(transform.params, {})
+
     def test_text_overlay_draws_bgr_text_and_preserves_metadata(self) -> None:
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         source = packet(frame)
@@ -1240,6 +1250,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[1].type, "dtype-convert")
         self.assertEqual(spec.elements[1].params["dtype"], "uint16")
 
+    def test_cli_parser_accepts_bypass(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mkv ! bypass ! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "bypass")
+        self.assertEqual(spec.elements[1].params, {})
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -1424,6 +1442,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("combine          Compose", output)
         self.assertIn("text-overlay     Compose", output)
         self.assertIn("mono-to-color    Color", output)
+        self.assertIn("bypass           Control", output)
         self.assertIn("fan-out          Control", output)
         self.assertIn("hist_equalize    Contrast", output)
         self.assertIn("linear-scale     Contrast", output)
@@ -1456,9 +1475,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Parameters: text*, color, position, x, y, font-size", output)
         self.assertIn("  Color\n    mono-to-color", output)
         self.assertIn("Parameters: format", output)
-        self.assertIn("  Control\n    fan-out", output)
+        self.assertIn("  Control\n    bypass", output)
+        self.assertIn("    fan-out", output)
         self.assertIn("Outputs: outN", output)
         self.assertIn("Parameters: outputs", output)
+        self.assertIn("Parameters: none", output)
         self.assertIn("  Contrast\n    hist_equalize", output)
         self.assertIn("    linear-scale", output)
         self.assertIn("  Debug\n    debug", output)
@@ -1594,6 +1615,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("choices=[bgr, rgb]", output)
         self.assertIn("formats=[gray]", output)
         self.assertIn("formats=[bgr, rgb]", output)
+
+    def test_cli_describe_bypass_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "bypass"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: bypass", output)
+        self.assertIn("Subcategory: Control", output)
+        self.assertIn("Parameters:\n  none", output)
+        self.assertIn("in: FramePacket", output)
+        self.assertIn("out: FramePacket", output)
 
     def test_cli_describe_fan_out_shows_dynamic_outputs(self) -> None:
         stdout = io.StringIO()

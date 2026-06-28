@@ -55,6 +55,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.sources.filesrc import FileSource
     from src.transformers.bit_shift import BitShift
     from src.transformers.bilateral import Bilateral
+    from src.transformers.bypass import Bypass
     from src.transformers.combine import Combine
     from src.transformers.debug import Debug
     from src.transformers.dtype_convert import DtypeConvert
@@ -81,6 +82,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Bilateral,
         LaplacianSharp,
         DtypeConvert,
+        Bypass,
         Debug,
         FanOut,
         Combine,
