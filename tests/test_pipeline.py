@@ -24,6 +24,7 @@ from src.transformers.bit_shift import BitShift
 from src.transformers.bilateral import Bilateral
 from src.transformers.combine import Combine
 from src.transformers.debug import Debug
+from src.transformers.dtype_convert import DtypeConvert
 from src.transformers.fan_out import FanOut
 from src.transformers.gaussian import Gaussian
 from src.transformers.hist_equalize import HistEqualize
@@ -848,6 +849,93 @@ class PipelineTests(unittest.TestCase):
                 {"in": packet(np.zeros((2, 2, 4), dtype=np.uint8), fmt="rgb")}
             )
 
+    def test_dtype_convert_uint8_to_uint16_preserves_values(self) -> None:
+        frame = np.array([[0, 1, 255]], dtype=np.uint8)
+        source = packet(frame, fmt="gray")
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            result = DtypeConvert("dtype", {"dtype": "uint16"}).process(
+                {"in": source}
+            )["out"][0]
+
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.data.tolist(), [[0, 1, 255]])
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertEqual(result.metadata.format, "gray")
+        self.assertEqual(result.metadata.extra["dtype_converted_by"], "dtype")
+        self.assertEqual(result.metadata.extra["dtype_convert_input_dtype"], "uint8")
+        self.assertEqual(result.metadata.extra["dtype_convert_output_dtype"], "uint16")
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_dtype_convert_uint16_to_uint8_clips_and_warns(self) -> None:
+        frame = np.array([[0, 255, 256, 1000]], dtype=np.uint16)
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            result = DtypeConvert("dtype", {"dtype": "uint8"}).process(
+                {"in": packet(frame, fmt="gray")}
+            )["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.data.tolist(), [[0, 255, 255, 255]])
+        self.assertIn("\033[33m", stderr.getvalue())
+        self.assertIn(
+            "Warning: dtype-convert clipping values above 255",
+            stderr.getvalue(),
+        )
+        self.assertIn("first clipped value=256 at row=0, col=2", stderr.getvalue())
+        self.assertIn("\033[0m", stderr.getvalue())
+
+    def test_dtype_convert_uint32_color_to_uint16_clips(self) -> None:
+        frame = np.array(
+            [[[0, 1, 65535], [65536, 70000, 100000]]],
+            dtype=np.uint32,
+        )
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            result = DtypeConvert("dtype", {"dtype": "uint16"}).process(
+                {"in": packet(frame, fmt="bgr")}
+            )["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(
+            result.data.tolist(),
+            [[[0, 1, 65535], [65535, 65535, 65535]]],
+        )
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertEqual(result.metadata.channels, 3)
+        self.assertIn("\033[33m", stderr.getvalue())
+        self.assertIn(
+            "Warning: dtype-convert clipping values above 65535",
+            stderr.getvalue(),
+        )
+        self.assertIn(
+            "first clipped value=65536 at row=0, col=1, channel=0",
+            stderr.getvalue(),
+        )
+        self.assertIn("\033[0m", stderr.getvalue())
+
+    def test_dtype_convert_rejects_invalid_parameters_and_frames(self) -> None:
+        with self.assertRaises(ValueError):
+            DtypeConvert("dtype", {"dtype": "float32"})
+
+        transform = DtypeConvert("dtype", {"dtype": "uint8"})
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2), dtype=np.float32), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2), dtype=np.uint8), fmt="mono")}
+            )
+        with self.assertRaises(ValueError):
+            transform.process(
+                {"in": packet(np.zeros((2, 2, 4), dtype=np.uint8), fmt="rgb")}
+            )
+
     def test_mono_to_color_defaults_to_bgr_from_2d_gray(self) -> None:
         frame = np.array([[1, 2], [3, 4]], dtype=np.uint8)
         source = packet(frame, fmt="gray")
@@ -1144,6 +1232,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[2].type, "mono-to-color")
         self.assertEqual(spec.elements[2].params["format"], "rgb")
 
+    def test_cli_parser_accepts_dtype_convert(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mkv ! dtype-convert dtype=uint16 ! filesink path=out.mp4"
+        )
+
+        self.assertEqual(spec.elements[1].type, "dtype-convert")
+        self.assertEqual(spec.elements[1].params["dtype"], "uint16")
+
     def test_cli_parser_named_graph(self) -> None:
         spec = parse_pipeline_expression(
             """
@@ -1335,6 +1431,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("bilateral        Filter", output)
         self.assertIn("resize           Geometry", output)
         self.assertIn("bit-shift        Intensity", output)
+        self.assertIn("dtype-convert    Intensity", output)
         self.assertIn("filesink     File", output)
         self.assertIn("displaysink  GUI", output)
 
@@ -1385,6 +1482,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("  Geometry\n    resize", output)
         self.assertIn("  Intensity\n    bit-shift", output)
         self.assertIn("Parameters: bits*, direction", output)
+        self.assertIn("    dtype-convert", output)
+        self.assertIn("Parameters: dtype*", output)
         self.assertIn("Sinks\n  File\n    filesink", output)
         self.assertIn("  GUI\n    displaysink", output)
 
@@ -1468,6 +1567,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("direction: str | optional", output)
         self.assertIn("choices=[left, right]", output)
         self.assertIn("formats=[bgr, gray, rgb]", output)
+
+    def test_cli_describe_dtype_convert_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "dtype-convert"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: dtype-convert", output)
+        self.assertIn("Subcategory: Intensity", output)
+        self.assertIn("dtype: str | required", output)
+        self.assertIn("choices=[uint8, uint16, uint32]", output)
+        self.assertIn("depths=[8, 16, 32]", output)
 
     def test_cli_describe_mono_to_color_shows_element_details(self) -> None:
         stdout = io.StringIO()
