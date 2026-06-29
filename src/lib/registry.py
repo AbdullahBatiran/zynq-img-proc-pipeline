@@ -73,6 +73,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.linear_scale import LinearScale
     from src.transformers.local_contrast import LocalContrast
     from src.transformers.log_filter import LogFilter
+    from src.transformers.meam import Meam
     from src.transformers.median import Median
     from src.transformers.morphology import Morphology
     from src.transformers.nl_means import NlMeans
@@ -95,6 +96,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         HistEqualize,
         LinearScale,
         Clahe,
+        Meam,
         ToneCurve,
         Retinex,
         LocalContrast,

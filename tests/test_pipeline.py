@@ -40,6 +40,7 @@ from src.transformers.laplacian_sharp import LaplacianSharp
 from src.transformers.linear_scale import LinearScale
 from src.transformers.local_contrast import LocalContrast
 from src.transformers.log_filter import LogFilter
+from src.transformers.meam import Meam
 from src.transformers.median import Median
 from src.transformers.morphology import Morphology
 from src.transformers.nl_means import NlMeans
@@ -92,6 +93,22 @@ def _changed_center(data: np.ndarray) -> tuple[int, int]:
     min_y, min_x = coords.min(axis=0)
     max_y, max_x = coords.max(axis=0)
     return ((int(min_x) + int(max_x)) // 2, (int(min_y) + int(max_y)) // 2)
+
+
+def _reference_meam(
+    frame: np.ndarray, *, detail_gain: float, blur_sigma: float
+) -> np.ndarray:
+    working = frame.astype(np.float32)
+    base = cv2.GaussianBlur(working, (0, 0), sigmaX=blur_sigma)
+    detail = working - base
+    base_min = np.min(base)
+    base_max = np.max(base)
+    dynamic_range = base_max - base_min
+    if dynamic_range == 0:
+        dynamic_range = 1.0
+    base_8bit = ((base - base_min) / dynamic_range) * 255.0
+    detail_8bit = (detail / dynamic_range) * 255.0 * detail_gain
+    return np.clip(base_8bit + detail_8bit, 0, 255).astype(np.uint8)
 
 
 class PipelineTests(unittest.TestCase):
@@ -379,6 +396,63 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(int(result.data[0, 0, 0]), 0)
         self.assertEqual(int(result.data[0, 0, 1]), 13)
         self.assertEqual(int(result.data.max()), 255)
+
+    def test_meam_matches_reference_math_and_outputs_uint8(self) -> None:
+        frame = np.array(
+            [
+                [5000, 5010, 5020, 5030],
+                [5040, 5400, 5410, 5060],
+                [5070, 5420, 5430, 5090],
+                [5100, 5110, 5120, 5130],
+            ],
+            dtype=np.uint16,
+        )
+        source = packet(frame, fmt="gray")
+        transform = Meam("meam", {"detail-gain": 4.0, "blur-sigma": 1.5})
+
+        result = transform.process({"in": source})["out"][0]
+
+        expected = _reference_meam(frame, detail_gain=4.0, blur_sigma=1.5)
+        np.testing.assert_array_equal(result.data, expected)
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.format, "gray")
+        self.assertEqual(result.metadata.channels, 1)
+        self.assertEqual(result.metadata.extra["enhanced_by"], "meam")
+        self.assertEqual(result.metadata.extra["enhancement_name"], "meam")
+        self.assertEqual(
+            result.metadata.extra["enhancement_params"],
+            {"detail-gain": 4.0, "blur-sigma": 1.5},
+        )
+        self.assertIn("meam_dynamic_range", result.metadata.extra)
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_meam_flat_frame_outputs_zero_and_accepts_aliases(self) -> None:
+        frame = np.full((3, 4, 1), 5000, dtype=np.uint16)
+        result = Meam("meam", {"detail_gain": 2.0, "blur_sigma": 3.0}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.data.shape, (3, 4))
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(int(result.data.max()), 0)
+        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.extra["meam_dynamic_range"], 1.0)
+
+    def test_meam_rejects_invalid_parameters_and_frames(self) -> None:
+        for params in ({"detail-gain": -0.1}, {"blur-sigma": 0}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                Meam("meam", params)
+
+        transform = Meam("meam", {})
+        invalid_frames = [
+            packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray"),
+            packet(np.zeros((2, 2), dtype=np.uint16), fmt="bgr"),
+            packet(np.zeros((2, 2, 3), dtype=np.uint16), fmt="gray"),
+        ]
+        for invalid in invalid_frames:
+            with self.subTest(metadata=invalid.metadata), self.assertRaises(ValueError):
+                transform.process({"in": invalid})
 
     def test_filters_preserve_dtype_depth_shape_and_metadata(self) -> None:
         cases = [
@@ -1519,18 +1593,21 @@ class PipelineTests(unittest.TestCase):
     def test_cli_parser_accepts_hyphenated_ir_enhancement_params(self) -> None:
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! clahe clip-limit=2.0 tile-grid-size=4 "
-            "! dog sigma-small=1.0 sigma-large=3.0 ! progress every-frames=30 "
-            "! filesink path=out.mp4"
+            "! meam detail-gain=4.0 blur-sigma=10.0 ! dog sigma-small=1.0 "
+            "sigma-large=3.0 ! progress every-frames=30 ! filesink path=out.mp4"
         )
 
         self.assertEqual(spec.elements[1].type, "clahe")
         self.assertEqual(spec.elements[1].params["clip-limit"], 2.0)
         self.assertEqual(spec.elements[1].params["tile-grid-size"], 4)
-        self.assertEqual(spec.elements[2].type, "dog")
-        self.assertEqual(spec.elements[2].params["sigma-small"], 1.0)
-        self.assertEqual(spec.elements[2].params["sigma-large"], 3.0)
-        self.assertEqual(spec.elements[3].type, "progress")
-        self.assertEqual(spec.elements[3].params["every-frames"], 30)
+        self.assertEqual(spec.elements[2].type, "meam")
+        self.assertEqual(spec.elements[2].params["detail-gain"], 4.0)
+        self.assertEqual(spec.elements[2].params["blur-sigma"], 10.0)
+        self.assertEqual(spec.elements[3].type, "dog")
+        self.assertEqual(spec.elements[3].params["sigma-small"], 1.0)
+        self.assertEqual(spec.elements[3].params["sigma-large"], 3.0)
+        self.assertEqual(spec.elements[4].type, "progress")
+        self.assertEqual(spec.elements[4].params["every-frames"], 30)
 
     def test_cli_parser_accepts_text_overlay_quoted_text(self) -> None:
         spec = parse_pipeline_expression(
@@ -1769,6 +1846,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Contrast", output)
         self.assertIn("linear-scale", output)
         self.assertIn("clahe", output)
+        self.assertIn("meam", output)
         self.assertIn("tone-curve", output)
         self.assertIn("debug", output)
         self.assertIn("progress", output)
@@ -1825,6 +1903,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Parameters: outputs", output)
         self.assertIn("  Contrast\n    clahe", output)
         self.assertIn("    hist_equalize", output)
+        self.assertIn("    meam", output)
         self.assertIn("Parameters: none", output)
         self.assertIn("    linear-scale", output)
         self.assertIn("    local-contrast", output)
@@ -1888,6 +1967,21 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("bins: int | optional", output)
         self.assertIn("output-bits: int | optional", output)
         self.assertIn("output-max: int | optional", output)
+
+    def test_cli_describe_meam_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "meam"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: meam", output)
+        self.assertIn("Subcategory: Contrast", output)
+        self.assertIn("detail-gain: float | optional", output)
+        self.assertIn("blur-sigma: float | optional", output)
+        self.assertIn("formats=[gray]", output)
+        self.assertIn("depths=[16]", output)
+        self.assertIn("depths=[8]", output)
 
     def test_cli_describe_debug_shows_element_details(self) -> None:
         stdout = io.StringIO()
