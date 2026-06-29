@@ -97,7 +97,11 @@ def _changed_center(data: np.ndarray) -> tuple[int, int]:
 
 
 def _reference_meam(
-    frame: np.ndarray, *, detail_gain: float, blur_sigma: float
+    frame: np.ndarray,
+    *,
+    detail_gain: float,
+    blur_sigma: float,
+    output_bits: int = 16,
 ) -> np.ndarray:
     working = frame.astype(np.float32)
     base = cv2.GaussianBlur(working, (0, 0), sigmaX=blur_sigma)
@@ -107,9 +111,11 @@ def _reference_meam(
     dynamic_range = base_max - base_min
     if dynamic_range == 0:
         dynamic_range = 1.0
-    base_8bit = ((base - base_min) / dynamic_range) * 255.0
-    detail_8bit = (detail / dynamic_range) * 255.0 * detail_gain
-    return np.clip(base_8bit + detail_8bit, 0, 255).astype(np.uint8)
+    output_max = float((1 << output_bits) - 1)
+    base_16bit = ((base - base_min) / dynamic_range) * output_max
+    detail_16bit = (detail / dynamic_range) * output_max * detail_gain
+    enhanced = base_16bit + detail_16bit
+    return np.clip(np.rint(enhanced), 0, output_max).astype(np.uint16)
 
 
 class PipelineTests(unittest.TestCase):
@@ -398,7 +404,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(int(result.data[0, 0, 1]), 13)
         self.assertEqual(int(result.data.max()), 255)
 
-    def test_meam_matches_reference_math_and_outputs_uint8(self) -> None:
+    def test_meam_matches_reference_math_and_outputs_uint16(self) -> None:
         frame = np.array(
             [
                 [5000, 5010, 5020, 5030],
@@ -415,33 +421,68 @@ class PipelineTests(unittest.TestCase):
 
         expected = _reference_meam(frame, detail_gain=4.0, blur_sigma=1.5)
         np.testing.assert_array_equal(result.data, expected)
-        self.assertEqual(result.data.dtype, np.uint8)
-        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
         self.assertEqual(result.metadata.format, "gray")
         self.assertEqual(result.metadata.channels, 1)
         self.assertEqual(result.metadata.extra["enhanced_by"], "meam")
         self.assertEqual(result.metadata.extra["enhancement_name"], "meam")
         self.assertEqual(
             result.metadata.extra["enhancement_params"],
-            {"detail-gain": 4.0, "blur-sigma": 1.5},
+            {"detail-gain": 4.0, "blur-sigma": 1.5, "output-bits": 16},
         )
         self.assertIn("meam_dynamic_range", result.metadata.extra)
+        self.assertEqual(result.metadata.extra["meam_output_bits"], 16)
+        self.assertEqual(result.metadata.extra["meam_output_max"], 65535)
         self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_meam_output_bits_limits_effective_range(self) -> None:
+        frame = np.array(
+            [
+                [5000, 5010, 5020, 5030],
+                [5040, 5400, 5410, 5060],
+                [5070, 5420, 5430, 5090],
+                [5100, 5110, 5120, 5130],
+            ],
+            dtype=np.uint16,
+        )
+        result = Meam(
+            "meam", {"detail-gain": 4.0, "blur-sigma": 1.5, "output-bits": 14}
+        ).process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        expected = _reference_meam(
+            frame, detail_gain=4.0, blur_sigma=1.5, output_bits=14
+        )
+        np.testing.assert_array_equal(result.data, expected)
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertLessEqual(int(result.data.max()), 16383)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertEqual(result.metadata.extra["meam_output_bits"], 14)
+        self.assertEqual(result.metadata.extra["meam_output_max"], 16383)
 
     def test_meam_flat_frame_outputs_zero_and_accepts_aliases(self) -> None:
         frame = np.full((3, 4, 1), 5000, dtype=np.uint16)
-        result = Meam("meam", {"detail_gain": 2.0, "blur_sigma": 3.0}).process(
-            {"in": packet(frame, fmt="gray")}
-        )["out"][0]
+        result = Meam(
+            "meam",
+            {"detail_gain": 2.0, "blur_sigma": 3.0, "output_bits": 12},
+        ).process({"in": packet(frame, fmt="gray")})["out"][0]
 
         self.assertEqual(result.data.shape, (3, 4))
-        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.data.dtype, np.uint16)
         self.assertEqual(int(result.data.max()), 0)
-        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.depth, 16)
         self.assertEqual(result.metadata.extra["meam_dynamic_range"], 1.0)
+        self.assertEqual(result.metadata.extra["meam_output_bits"], 12)
+        self.assertEqual(result.metadata.extra["meam_output_max"], 4095)
 
     def test_meam_rejects_invalid_parameters_and_frames(self) -> None:
-        for params in ({"detail-gain": -0.1}, {"blur-sigma": 0}):
+        for params in (
+            {"detail-gain": -0.1},
+            {"blur-sigma": 0},
+            {"output-bits": 0},
+            {"output-bits": 17},
+            {"output_bits": 14, "output-bits": 12},
+        ):
             with self.subTest(params=params), self.assertRaises(ValueError):
                 Meam("meam", params)
 
@@ -1640,7 +1681,8 @@ class PipelineTests(unittest.TestCase):
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! Unsharp kernel-size=3 ! gaussian sigma-x=1.0 "
             "! bilateral sigma-color=25 sigma-space=3 ! laplacian-sharp "
-            "kernel-size=3 iterations=2 ! filesink path=out.mp4"
+            "kernel-size=3 iterations=2 ! sharpen-kernel kernel=full "
+            "iterations=2 ! filesink path=out.mp4"
         )
 
         self.assertEqual(spec.elements[1].type, "Unsharp")
@@ -1653,11 +1695,15 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[4].type, "laplacian-sharp")
         self.assertEqual(spec.elements[4].params["kernel-size"], 3)
         self.assertEqual(spec.elements[4].params["iterations"], 2)
+        self.assertEqual(spec.elements[5].type, "sharpen-kernel")
+        self.assertEqual(spec.elements[5].params["kernel"], "full")
+        self.assertEqual(spec.elements[5].params["iterations"], 2)
 
     def test_cli_parser_accepts_hyphenated_ir_enhancement_params(self) -> None:
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! clahe clip-limit=2.0 tile-grid-size=4 "
-            "! meam detail-gain=4.0 blur-sigma=10.0 ! dog sigma-small=1.0 "
+            "! meam detail-gain=4.0 blur-sigma=10.0 output-bits=14 "
+            "! dog sigma-small=1.0 "
             "sigma-large=3.0 ! progress every-frames=30 ! filesink path=out.mp4"
         )
 
@@ -1667,6 +1713,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[2].type, "meam")
         self.assertEqual(spec.elements[2].params["detail-gain"], 4.0)
         self.assertEqual(spec.elements[2].params["blur-sigma"], 10.0)
+        self.assertEqual(spec.elements[2].params["output-bits"], 14)
         self.assertEqual(spec.elements[3].type, "dog")
         self.assertEqual(spec.elements[3].params["sigma-small"], 1.0)
         self.assertEqual(spec.elements[3].params["sigma-large"], 3.0)
@@ -1918,6 +1965,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("bilateral", output)
         self.assertIn("Filter", output)
         self.assertIn("morphology", output)
+        self.assertIn("sharpen-kernel", output)
         self.assertIn("wavelet-denoise", output)
         self.assertIn("resize", output)
         self.assertIn("Geometry", output)
@@ -1989,6 +2037,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("    laplacian-sharp", output)
         self.assertIn("    morphology", output)
         self.assertIn("    nl-means", output)
+        self.assertIn("    sharpen-kernel", output)
         self.assertIn("    tv-denoise", output)
         self.assertIn("    wavelet-denoise", output)
         self.assertIn(
@@ -2043,9 +2092,10 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Subcategory: Contrast", output)
         self.assertIn("detail-gain: float | optional", output)
         self.assertIn("blur-sigma: float | optional", output)
+        self.assertIn("output-bits: int | optional", output)
         self.assertIn("formats=[gray]", output)
         self.assertIn("depths=[16]", output)
-        self.assertIn("depths=[8]", output)
+        self.assertEqual(output.count("depths=[16]"), 2)
 
     def test_cli_describe_debug_shows_element_details(self) -> None:
         stdout = io.StringIO()
@@ -2185,6 +2235,10 @@ class PipelineTests(unittest.TestCase):
                 "amount: float | optional",
                 "iterations: int | optional",
                 "mode: str | optional",
+            ],
+            "sharpen-kernel": [
+                "kernel: str | optional",
+                "iterations: int | optional",
             ],
             "clahe": ["clip-limit: float | optional", "tile-grid-size: int | optional"],
             "tone-curve": ["mode: str | optional", "input-max: number | optional"],

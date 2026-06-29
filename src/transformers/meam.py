@@ -21,7 +21,7 @@ class Meam(Transformer):
     def contract(cls) -> ElementContract:
         return ElementContract(
             input_ports={"in": PortContract("in", formats={"gray"}, depths={16})},
-            output_ports={"out": PortContract("out", formats={"gray"}, depths={8})},
+            output_ports={"out": PortContract("out", formats={"gray"}, depths={16})},
             parameters={
                 "detail-gain": ParameterContract(
                     "detail-gain",
@@ -35,6 +35,12 @@ class Meam(Transformer):
                     default=15.0,
                     description="Gaussian sigma for base/background separation.",
                 ),
+                "output-bits": ParameterContract(
+                    "output-bits",
+                    "int",
+                    default=16,
+                    description="Effective output bit depth within the uint16 container.",
+                ),
             },
             description="Apply MEAM base-detail contrast enhancement.",
             subcategory="Contrast",
@@ -45,12 +51,18 @@ class Meam(Transformer):
         normalized = dict(params)
         _normalize_alias(normalized, "detail_gain", "detail-gain")
         _normalize_alias(normalized, "blur_sigma", "blur-sigma")
+        _normalize_alias(normalized, "output_bits", "output-bits")
         self.detail_gain = float(normalized.get("detail-gain", 3.0))
         self.blur_sigma = float(normalized.get("blur-sigma", 15.0))
+        self.output_bits = int(normalized.get("output-bits", 16))
         if self.detail_gain < 0:
             raise ValueError("meam detail-gain must be non-negative")
         if self.blur_sigma <= 0:
             raise ValueError("meam blur-sigma must be positive")
+        if self.output_bits <= 0:
+            raise ValueError("meam output-bits must be a positive integer")
+        if self.output_bits > 16:
+            raise ValueError("meam output-bits cannot exceed 16")
 
     def process(self, inputs: PacketInputs) -> PacketOutputs:
         packet = self._single_input(inputs)
@@ -70,10 +82,13 @@ class Meam(Transformer):
                 "enhancement_params": {
                     "detail-gain": self.detail_gain,
                     "blur-sigma": self.blur_sigma,
+                    "output-bits": self.output_bits,
                 },
                 "meam_base_min": self._last_base_min,
                 "meam_base_max": self._last_base_max,
                 "meam_dynamic_range": self._last_dynamic_range,
+                "meam_output_bits": self.output_bits,
+                "meam_output_max": self._last_output_max,
             },
         )
         return {"out": [FramePacket(data=enhanced, metadata=metadata)]}
@@ -92,14 +107,16 @@ class Meam(Transformer):
         if dynamic_range == 0:
             dynamic_range = 1.0
 
-        base_8bit = ((base - base_min) / dynamic_range) * 255.0
-        detail_8bit = (detail / dynamic_range) * 255.0 * self.detail_gain
-        enhanced = base_8bit + detail_8bit
+        output_max = float((1 << self.output_bits) - 1)
+        base_16bit = ((base - base_min) / dynamic_range) * output_max
+        detail_16bit = (detail / dynamic_range) * output_max * self.detail_gain
+        enhanced = base_16bit + detail_16bit
 
         self._last_base_min = base_min
         self._last_base_max = base_max
         self._last_dynamic_range = dynamic_range
-        return np.clip(enhanced, 0, 255).astype(np.uint8)
+        self._last_output_max = int(output_max)
+        return np.clip(np.rint(enhanced), 0, output_max).astype(np.uint16)
 
     def _validate_packet(self, packet: FramePacket) -> None:
         metadata = packet.metadata
