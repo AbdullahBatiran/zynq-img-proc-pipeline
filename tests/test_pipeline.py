@@ -49,6 +49,7 @@ from src.transformers.retinex import Retinex
 from src.transformers.mono_to_color import MonoToColor
 from src.transformers.resize import Resize
 from src.transformers.rolling_background import RollingBackground
+from src.transformers.sharpen_kernel import SharpenKernel
 from src.transformers.temporal_denoise import TemporalDenoise
 from src.transformers.tone_curve import ToneCurve
 from src.transformers.text_overlay import TextOverlay
@@ -493,6 +494,66 @@ class PipelineTests(unittest.TestCase):
                         self.assertEqual(filter_params[key], value)
                     self.assertIn(source.metadata.packet_id, result.metadata.parents)
 
+    def test_sharpen_kernel_cross_and_full_match_filter2d(self) -> None:
+        frame = np.array(
+            [
+                [10, 20, 30],
+                [40, 50, 60],
+                [70, 80, 90],
+            ],
+            dtype=np.uint8,
+        )
+        kernels = {
+            "cross": np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float64),
+            "full": np.array(
+                [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]],
+                dtype=np.float64,
+            ),
+        }
+
+        for kernel_name, kernel in kernels.items():
+            with self.subTest(kernel=kernel_name):
+                source = packet(frame, fmt="gray")
+                result = SharpenKernel("sharp", {"kernel": kernel_name}).process(
+                    {"in": source}
+                )["out"][0]
+                expected = cv2.filter2D(
+                    frame.astype(np.float64),
+                    cv2.CV_64F,
+                    kernel,
+                )
+                expected = np.clip(expected, 0, 255).astype(np.uint8)
+
+                np.testing.assert_array_equal(result.data, expected)
+                self.assertEqual(result.data.dtype, np.uint8)
+                self.assertEqual(result.metadata.depth, 8)
+                self.assertEqual(result.metadata.format, "gray")
+                self.assertEqual(result.metadata.extra["filtered_by"], "sharp")
+                self.assertEqual(result.metadata.extra["filter_name"], "sharpen-kernel")
+                self.assertEqual(
+                    result.metadata.extra["filter_params"],
+                    {"kernel": kernel_name, "iterations": 1},
+                )
+                self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_sharpen_kernel_supports_uint16_color_and_iterations(self) -> None:
+        frame = (np.arange(3 * 4 * 3, dtype=np.uint16).reshape((3, 4, 3)) * 100)
+        result = SharpenKernel("sharp", {"iterations": 2}).process(
+            {"in": packet(frame, fmt="rgb")}
+        )["out"][0]
+
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertEqual(result.metadata.channels, 3)
+        self.assertEqual(result.metadata.format, "rgb")
+        self.assertEqual(result.metadata.extra["filter_params"]["iterations"], 2)
+
+    def test_sharpen_kernel_rejects_invalid_parameters(self) -> None:
+        for params in ({"kernel": "laplacian"}, {"iterations": 0}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                SharpenKernel("sharp", params)
+
     def test_filters_preserve_three_channel_shape(self) -> None:
         frame = (np.arange(5 * 5 * 3, dtype=np.uint16).reshape((5, 5, 3)) * 100)
         cases = [
@@ -501,6 +562,7 @@ class PipelineTests(unittest.TestCase):
             Gaussian("f", {"kernel-size": 3}),
             Bilateral("f", {"diameter": 3, "sigma-color": 100.0}),
             LaplacianSharp("f", {"kernel-size": 3}),
+            SharpenKernel("f", {}),
         ]
 
         for transform in cases:
@@ -543,6 +605,8 @@ class PipelineTests(unittest.TestCase):
             (LaplacianSharp, {"iterations": 0}),
             (LaplacianSharp, {"mode": "wrong"}),
             (LaplacianSharp, {"scale": -1.0}),
+            (SharpenKernel, {"kernel": "unknown"}),
+            (SharpenKernel, {"iterations": 0}),
         ]
         for transform_cls, params in invalid_configurations:
             with self.subTest(transform=transform_cls.__name__, params=params):

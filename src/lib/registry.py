@@ -83,6 +83,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.resize import Resize
     from src.transformers.text_overlay import TextOverlay
     from src.transformers.rolling_background import RollingBackground
+    from src.transformers.sharpen_kernel import SharpenKernel
     from src.transformers.temporal_denoise import TemporalDenoise
     from src.transformers.tone_curve import ToneCurve
     from src.transformers.unsharp import Unsharp
@@ -106,6 +107,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         Gaussian,
         Bilateral,
         LaplacianSharp,
+        SharpenKernel,
         Morphology,
         Dog,
         LogFilter,
