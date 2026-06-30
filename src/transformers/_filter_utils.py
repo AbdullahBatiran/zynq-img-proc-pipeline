@@ -12,6 +12,7 @@ from src.lib.packets import FrameMetadata, FramePacket, infer_frame_shape
 SUPPORTED_FORMATS = {"bgr", "rgb", "gray"}
 SUPPORTED_DEPTHS = {8, 16}
 SUPPORTED_CHANNELS = {1, 3}
+RANGE_MODES = {"clip", "limit"}
 
 
 def validate_filter_packet(packet: FramePacket, element_name: str) -> None:
@@ -147,10 +148,39 @@ def minmax_normalize(frame: np.ndarray, dtype: np.dtype) -> np.ndarray:
 
 def clip_cast_preserve_dtype(frame: np.ndarray, dtype: np.dtype) -> np.ndarray:
     max_value = dtype_max(dtype)
-    clipped = np.clip(frame, 0, max_value)
+    return clip_cast_to_output_max(frame, dtype, max_value)
+
+
+def resolve_output_bits_and_max(
+    dtype: np.dtype, output_bits: int | None, element_name: str
+) -> tuple[int, int]:
+    container_bits = dtype.itemsize * 8
+    resolved_bits = container_bits if output_bits is None else output_bits
+    if resolved_bits <= 0:
+        raise ValueError(f"{element_name} output-bits must be a positive integer")
+    if resolved_bits > container_bits:
+        raise ValueError(f"{element_name} output-bits cannot exceed container depth")
+    max_value = dtype_max(dtype)
+    return resolved_bits, min((1 << resolved_bits) - 1, max_value)
+
+
+def clip_cast_to_output_max(
+    frame: np.ndarray, dtype: np.dtype, output_max: int
+) -> np.ndarray:
+    clipped = np.clip(frame, 0, output_max)
     if np.issubdtype(dtype, np.integer):
         clipped = np.rint(clipped)
     return clipped.astype(dtype)
+
+
+def limit_sharpened_detail(
+    base: np.ndarray, candidate: np.ndarray, output_max: int
+) -> np.ndarray:
+    base_float = base.astype(np.float64)
+    candidate_float = candidate.astype(np.float64)
+    detail = candidate_float - base_float
+    limited_detail = np.clip(detail, -base_float, float(output_max) - base_float)
+    return base_float + limited_detail
 
 
 def apply_per_channel(frame: np.ndarray, func):

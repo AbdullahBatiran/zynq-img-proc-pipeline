@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
@@ -19,6 +19,7 @@ from src.lib.packets import FrameMetadata, FramePacket, new_packet_id
 from src.lib.pipeline import ConnectionSpec, ElementSpec, Pipeline, PipelineSpec
 from src.lib.registry import register_builtin_elements
 from src.sinks.displaysink import DisplaySink
+from src.sinks.filesink import FileSink
 from src.sources.filesrc import infer_frame_format, normalize_decoded_frame
 from src.transformers.bit_shift import BitShift
 from src.transformers.bilateral import Bilateral
@@ -573,7 +574,12 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(result.metadata.extra["filter_name"], "sharpen-kernel")
                 self.assertEqual(
                     result.metadata.extra["filter_params"],
-                    {"kernel": kernel_name, "iterations": 1},
+                    {
+                        "kernel": kernel_name,
+                        "iterations": 1,
+                        "range-mode": "clip",
+                        "output-bits": 8,
+                    },
                 )
                 self.assertIn(source.metadata.packet_id, result.metadata.parents)
 
@@ -589,9 +595,66 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.metadata.channels, 3)
         self.assertEqual(result.metadata.format, "rgb")
         self.assertEqual(result.metadata.extra["filter_params"]["iterations"], 2)
+        self.assertEqual(result.metadata.extra["filter_params"]["range-mode"], "clip")
+        self.assertEqual(result.metadata.extra["filter_params"]["output-bits"], 16)
+
+    def test_sharpening_limit_mode_respects_output_bits_range(self) -> None:
+        frame = np.array(
+            [
+                [0, 1000, 16000],
+                [2000, 12000, 20000],
+                [4000, 14000, 24000],
+            ],
+            dtype=np.uint16,
+        )
+        transforms = [
+            Unsharp(
+                "sharp",
+                {
+                    "amount": 2.0,
+                    "kernel-size": 3,
+                    "range-mode": "limit",
+                    "output-bits": 14,
+                },
+            ),
+            LaplacianSharp(
+                "sharp",
+                {"amount": 1.0, "range-mode": "limit", "output-bits": 14},
+            ),
+            SharpenKernel(
+                "sharp",
+                {"kernel": "full", "range-mode": "limit", "output-bits": 14},
+            ),
+        ]
+
+        for transform in transforms:
+            with self.subTest(transform=transform.type_name):
+                source = packet(frame, fmt="gray")
+                result = transform.process({"in": source})["out"][0]
+
+                self.assertEqual(result.data.dtype, np.uint16)
+                self.assertEqual(result.data.shape, frame.shape)
+                self.assertEqual(result.metadata.depth, 16)
+                self.assertEqual(result.metadata.format, "gray")
+                self.assertEqual(result.metadata.channels, 1)
+                self.assertLessEqual(int(result.data.max()), 16383)
+                self.assertGreaterEqual(int(result.data.min()), 0)
+                self.assertEqual(
+                    result.metadata.extra["filter_params"]["range-mode"], "limit"
+                )
+                self.assertEqual(
+                    result.metadata.extra["filter_params"]["output-bits"], 14
+                )
+                self.assertIn(source.metadata.packet_id, result.metadata.parents)
 
     def test_sharpen_kernel_rejects_invalid_parameters(self) -> None:
-        for params in ({"kernel": "laplacian"}, {"iterations": 0}):
+        for params in (
+            {"kernel": "laplacian"},
+            {"iterations": 0},
+            {"range-mode": "bad"},
+            {"output-bits": 0},
+            {"output-bits": 17},
+        ):
             with self.subTest(params=params), self.assertRaises(ValueError):
                 SharpenKernel("sharp", params)
 
@@ -633,6 +696,9 @@ class PipelineTests(unittest.TestCase):
             (Unsharp, {"amount": -0.1}),
             (Unsharp, {"sigma": -1.0}),
             (Unsharp, {"kernel-size": 2}),
+            (Unsharp, {"range-mode": "bad"}),
+            (Unsharp, {"output-bits": 0}),
+            (Unsharp, {"output-bits": 17}),
             (Median, {"kernel-size": 0}),
             (Median, {"kernel-size": 4}),
             (Gaussian, {"kernel-size": 2}),
@@ -646,8 +712,14 @@ class PipelineTests(unittest.TestCase):
             (LaplacianSharp, {"iterations": 0}),
             (LaplacianSharp, {"mode": "wrong"}),
             (LaplacianSharp, {"scale": -1.0}),
+            (LaplacianSharp, {"range-mode": "bad"}),
+            (LaplacianSharp, {"output-bits": 0}),
+            (LaplacianSharp, {"output-bits": 17}),
             (SharpenKernel, {"kernel": "unknown"}),
             (SharpenKernel, {"iterations": 0}),
+            (SharpenKernel, {"range-mode": "bad"}),
+            (SharpenKernel, {"output-bits": 0}),
+            (SharpenKernel, {"output-bits": 17}),
         ]
         for transform_cls, params in invalid_configurations:
             with self.subTest(transform=transform_cls.__name__, params=params):
@@ -657,6 +729,10 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Median("f", {"kernel-size": 7}).process(
                 {"in": packet(np.zeros((5, 5), dtype=np.uint16), fmt="gray")}
+            )
+        with self.assertRaises(ValueError):
+            Unsharp("f", {"output-bits": 9}).process(
+                {"in": packet(np.zeros((5, 5), dtype=np.uint8), fmt="gray")}
             )
 
     def test_laplacian_sharp_iterations_change_output(self) -> None:
@@ -1220,7 +1296,9 @@ class PipelineTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with contextlib.redirect_stderr(stderr):
-            result = DtypeConvert("dtype", {"dtype": "uint16"}).process(
+            result = DtypeConvert(
+                "dtype", {"dtype": "uint16", "overflow": "clamp"}
+            ).process(
                 {"in": source}
             )["out"][0]
 
@@ -1232,6 +1310,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.metadata.extra["dtype_converted_by"], "dtype")
         self.assertEqual(result.metadata.extra["dtype_convert_input_dtype"], "uint8")
         self.assertEqual(result.metadata.extra["dtype_convert_output_dtype"], "uint16")
+        self.assertEqual(result.metadata.extra["dtype_convert_overflow"], "clamp")
         self.assertIn(source.metadata.packet_id, result.metadata.parents)
 
     def test_dtype_convert_uint16_to_uint8_clips_and_warns(self) -> None:
@@ -1239,7 +1318,7 @@ class PipelineTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with contextlib.redirect_stderr(stderr):
-            result = DtypeConvert("dtype", {"dtype": "uint8"}).process(
+            result = DtypeConvert("dtype", {"dtype": "uint8", "overflow": "clamp"}).process(
                 {"in": packet(frame, fmt="gray")}
             )["out"][0]
 
@@ -1252,6 +1331,7 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertIn("first clipped value=256 at row=0, col=2", stderr.getvalue())
         self.assertIn("\033[0m", stderr.getvalue())
+        self.assertEqual(result.metadata.extra["dtype_convert_overflow"], "clamp")
 
     def test_dtype_convert_uint32_color_to_uint16_clips(self) -> None:
         frame = np.array(
@@ -1261,7 +1341,9 @@ class PipelineTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with contextlib.redirect_stderr(stderr):
-            result = DtypeConvert("dtype", {"dtype": "uint16"}).process(
+            result = DtypeConvert(
+                "dtype", {"dtype": "uint16", "overflow": "clamp"}
+            ).process(
                 {"in": packet(frame, fmt="bgr")}
             )["out"][0]
 
@@ -1283,11 +1365,28 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertIn("\033[0m", stderr.getvalue())
 
+    def test_dtype_convert_wrap_matches_numpy_cast_without_warning(self) -> None:
+        frame = np.array([[0, 255, 256, 1000]], dtype=np.uint16)
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            result = DtypeConvert("dtype", {"dtype": "uint8", "overflow": "wrap"}).process(
+                {"in": packet(frame, fmt="gray")}
+            )["out"][0]
+
+        np.testing.assert_array_equal(result.data, frame.astype(np.uint8))
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(result.metadata.extra["dtype_convert_overflow"], "wrap")
+
     def test_dtype_convert_rejects_invalid_parameters_and_frames(self) -> None:
         with self.assertRaises(ValueError):
             DtypeConvert("dtype", {"dtype": "float32"})
+        with self.assertRaises(ValueError):
+            DtypeConvert("dtype", {"dtype": "uint8"})
+        with self.assertRaises(ValueError):
+            DtypeConvert("dtype", {"dtype": "uint8", "overflow": "bad"})
 
-        transform = DtypeConvert("dtype", {"dtype": "uint8"})
+        transform = DtypeConvert("dtype", {"dtype": "uint8", "overflow": "clamp"})
         with self.assertRaises(ValueError):
             transform.process(
                 {"in": packet(np.zeros((2, 2), dtype=np.float32), fmt="gray")}
@@ -1679,14 +1778,17 @@ class PipelineTests(unittest.TestCase):
 
     def test_cli_parser_accepts_hyphenated_filter_params(self) -> None:
         spec = parse_pipeline_expression(
-            "filesrc path=in.mp4 ! Unsharp kernel-size=3 ! gaussian sigma-x=1.0 "
+            "filesrc path=in.mp4 ! Unsharp kernel-size=3 range-mode=limit "
+            "output-bits=8 ! gaussian sigma-x=1.0 "
             "! bilateral sigma-color=25 sigma-space=3 ! laplacian-sharp "
             "kernel-size=3 iterations=2 ! sharpen-kernel kernel=full "
-            "iterations=2 ! filesink path=out.mp4"
+            "iterations=2 range-mode=limit output-bits=8 ! filesink path=out.mp4"
         )
 
         self.assertEqual(spec.elements[1].type, "Unsharp")
         self.assertEqual(spec.elements[1].params["kernel-size"], 3)
+        self.assertEqual(spec.elements[1].params["range-mode"], "limit")
+        self.assertEqual(spec.elements[1].params["output-bits"], 8)
         self.assertEqual(spec.elements[2].type, "gaussian")
         self.assertEqual(spec.elements[2].params["sigma-x"], 1.0)
         self.assertEqual(spec.elements[3].type, "bilateral")
@@ -1698,6 +1800,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[5].type, "sharpen-kernel")
         self.assertEqual(spec.elements[5].params["kernel"], "full")
         self.assertEqual(spec.elements[5].params["iterations"], 2)
+        self.assertEqual(spec.elements[5].params["range-mode"], "limit")
+        self.assertEqual(spec.elements[5].params["output-bits"], 8)
 
     def test_cli_parser_accepts_hyphenated_ir_enhancement_params(self) -> None:
         spec = parse_pipeline_expression(
@@ -1745,11 +1849,22 @@ class PipelineTests(unittest.TestCase):
 
     def test_cli_parser_accepts_dtype_convert(self) -> None:
         spec = parse_pipeline_expression(
-            "filesrc path=in.mkv ! dtype-convert dtype=uint16 ! filesink path=out.mp4"
+            "filesrc path=in.mkv ! dtype-convert dtype=uint16 overflow=clamp "
+            "! filesink path=out.mp4"
         )
 
         self.assertEqual(spec.elements[1].type, "dtype-convert")
         self.assertEqual(spec.elements[1].params["dtype"], "uint16")
+        self.assertEqual(spec.elements[1].params["overflow"], "clamp")
+
+    def test_cli_parser_accepts_filesink_quality(self) -> None:
+        spec = parse_pipeline_expression(
+            "filesrc path=in.mkv ! filesink path=out.avi codec=MJPG quality=95"
+        )
+
+        self.assertEqual(spec.elements[1].type, "filesink")
+        self.assertEqual(spec.elements[1].params["codec"], "MJPG")
+        self.assertEqual(spec.elements[1].params["quality"], 95)
 
     def test_cli_parser_accepts_bypass(self) -> None:
         spec = parse_pipeline_expression(
@@ -2056,6 +2171,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Sinks\n  File\n    filesink", output)
         self.assertIn("  GUI\n    displaysink", output)
 
+    def test_cli_describe_filesink_shows_quality_option(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "filesink"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: filesink", output)
+        self.assertIn("Subcategory: File", output)
+        self.assertIn("path: path | required", output)
+        self.assertIn("codec: str | optional", output)
+        self.assertIn("quality: int | optional", output)
+
     def test_cli_describe_linear_scale_shows_element_details(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -2163,7 +2291,9 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Element: dtype-convert", output)
         self.assertIn("Subcategory: Intensity", output)
         self.assertIn("dtype: str | required", output)
+        self.assertIn("overflow: str | required", output)
         self.assertIn("choices=[uint8, uint16, uint32]", output)
+        self.assertIn("choices=[clamp, wrap]", output)
         self.assertIn("depths=[8, 16, 32]", output)
 
     def test_cli_describe_mono_to_color_shows_element_details(self) -> None:
@@ -2223,7 +2353,12 @@ class PipelineTests(unittest.TestCase):
 
     def test_cli_describe_filter_elements(self) -> None:
         expectations = {
-            "unsharp": ["amount: float | optional", "kernel-size: int | optional"],
+            "unsharp": [
+                "amount: float | optional",
+                "kernel-size: int | optional",
+                "range-mode: str | optional",
+                "output-bits: int | optional",
+            ],
             "median": ["kernel-size: int | optional"],
             "gaussian": ["sigma-x: float | optional", "sigma-y: float | optional"],
             "bilateral": [
@@ -2235,10 +2370,14 @@ class PipelineTests(unittest.TestCase):
                 "amount: float | optional",
                 "iterations: int | optional",
                 "mode: str | optional",
+                "range-mode: str | optional",
+                "output-bits: int | optional",
             ],
             "sharpen-kernel": [
                 "kernel: str | optional",
                 "iterations: int | optional",
+                "range-mode: str | optional",
+                "output-bits: int | optional",
             ],
             "clahe": ["clip-limit: float | optional", "tile-grid-size: int | optional"],
             "tone-curve": ["mode: str | optional", "input-max: number | optional"],
@@ -2420,6 +2559,43 @@ class PipelineTests(unittest.TestCase):
             sink.process({"in": frame})
 
         self.assertTrue(context.stop_requested)
+
+    def test_filesink_sets_quality_when_requested(self) -> None:
+        frame = packet(np.zeros((4, 5, 3), dtype=np.uint8))
+        writer = MagicMock()
+        writer.isOpened.return_value = True
+        writer.set.return_value = True
+
+        with patch("src.sinks.filesink.cv2.VideoWriter", return_value=writer):
+            FileSink(
+                "out",
+                {"path": "out.avi", "codec": "MJPG", "quality": 95},
+            ).process({"in": frame})
+
+        writer.set.assert_called_once_with(cv2.VIDEOWRITER_PROP_QUALITY, 95.0)
+        writer.write.assert_called_once_with(frame.data)
+
+    def test_filesink_warns_when_quality_is_not_supported(self) -> None:
+        frame = packet(np.zeros((4, 5, 3), dtype=np.uint8))
+        writer = MagicMock()
+        writer.isOpened.return_value = True
+        writer.set.return_value = False
+        stderr = io.StringIO()
+
+        with (
+            patch("src.sinks.filesink.cv2.VideoWriter", return_value=writer),
+            contextlib.redirect_stderr(stderr),
+        ):
+            FileSink("out", {"path": "out.mp4", "quality": 95}).process(
+                {"in": frame}
+            )
+
+        self.assertIn("filesink quality option was not accepted", stderr.getvalue())
+
+    def test_filesink_rejects_invalid_quality(self) -> None:
+        for quality in (-1, 101):
+            with self.subTest(quality=quality), self.assertRaises(ValueError):
+                FileSink("out", {"path": "out.mp4", "quality": quality})
 
     def test_pipeline_writes_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

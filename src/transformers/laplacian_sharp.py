@@ -11,9 +11,12 @@ from src.lib.contracts import ElementContract, ParameterContract, PortContract
 from src.lib.elements import PacketInputs, PacketOutputs, Transformer
 from src.lib.packets import FramePacket
 from src.transformers._filter_utils import (
-    clip_cast_preserve_dtype,
+    RANGE_MODES,
+    clip_cast_to_output_max,
     filtered_metadata,
+    limit_sharpened_detail,
     normalize_aliases,
+    resolve_output_bits_and_max,
     validate_filter_packet,
     validate_odd_kernel_size,
 )
@@ -74,6 +77,19 @@ class LaplacianSharp(Transformer):
                     default=0.0,
                     description="Delta passed to cv2.Laplacian.",
                 ),
+                "range-mode": ParameterContract(
+                    "range-mode",
+                    "str",
+                    default="clip",
+                    choices=tuple(sorted(RANGE_MODES)),
+                    description="Clip output or limit sharpening detail to range.",
+                ),
+                "output-bits": ParameterContract(
+                    "output-bits",
+                    "int",
+                    default="<container depth>",
+                    description="Effective output bit depth within the dtype container.",
+                ),
             },
             description="Sharpen frames with one or more Laplacian passes.",
             subcategory="Filter",
@@ -81,13 +97,26 @@ class LaplacianSharp(Transformer):
 
     def configure(self, params: dict[str, Any]) -> None:
         super().configure(params)
-        normalized = normalize_aliases(params, (("kernel_size", "kernel-size"),))
+        normalized = normalize_aliases(
+            params,
+            (
+                ("kernel_size", "kernel-size"),
+                ("range_mode", "range-mode"),
+                ("output_bits", "output-bits"),
+            ),
+        )
         self.amount = float(normalized.get("amount", 1.0))
         self.kernel_size = int(normalized.get("kernel-size", 3))
         self.iterations = int(normalized.get("iterations", 1))
         self.mode = str(normalized.get("mode", "subtract"))
         self.scale = float(normalized.get("scale", 1.0))
         self.delta = float(normalized.get("delta", 0.0))
+        self.range_mode = str(normalized.get("range-mode", "clip"))
+        self.output_bits = (
+            int(normalized["output-bits"])
+            if normalized.get("output-bits") is not None
+            else None
+        )
 
         if self.amount < 0:
             raise ValueError("laplacian-sharp amount must be non-negative")
@@ -98,25 +127,39 @@ class LaplacianSharp(Transformer):
             raise ValueError("laplacian-sharp mode must be 'subtract' or 'add'")
         if self.scale < 0:
             raise ValueError("laplacian-sharp scale must be non-negative")
+        if self.range_mode not in RANGE_MODES:
+            raise ValueError("laplacian-sharp range-mode must be 'clip' or 'limit'")
+        if self.output_bits is not None and self.output_bits <= 0:
+            raise ValueError("laplacian-sharp output-bits must be a positive integer")
+        if self.output_bits is not None and self.output_bits > 16:
+            raise ValueError("laplacian-sharp output-bits cannot exceed 16")
 
     def process(self, inputs: PacketInputs) -> PacketOutputs:
         packet = self._single_input(inputs)
         validate_filter_packet(packet, "laplacian-sharp")
+        resolved_bits, output_max = resolve_output_bits_and_max(
+            packet.data.dtype, self.output_bits, "laplacian-sharp"
+        )
         sharpened = packet.data.astype(np.float64)
         for _ in range(self.iterations):
+            base = sharpened
             laplacian = cv2.Laplacian(
-                sharpened,
+                base,
                 cv2.CV_64F,
                 ksize=self.kernel_size,
                 scale=self.scale,
                 delta=self.delta,
             )
             if self.mode == "subtract":
-                sharpened = sharpened - self.amount * laplacian
+                candidate = base - self.amount * laplacian
             else:
-                sharpened = sharpened + self.amount * laplacian
+                candidate = base + self.amount * laplacian
+            if self.range_mode == "limit":
+                sharpened = limit_sharpened_detail(base, candidate, output_max)
+            else:
+                sharpened = candidate
 
-        sharpened = clip_cast_preserve_dtype(sharpened, packet.data.dtype)
+        sharpened = clip_cast_to_output_max(sharpened, packet.data.dtype, output_max)
         metadata = filtered_metadata(
             packet,
             sharpened,
@@ -129,6 +172,8 @@ class LaplacianSharp(Transformer):
                 "mode": self.mode,
                 "scale": self.scale,
                 "delta": self.delta,
+                "range-mode": self.range_mode,
+                "output-bits": resolved_bits,
             },
         )
         return {"out": [FramePacket(data=sharpened, metadata=metadata)]}

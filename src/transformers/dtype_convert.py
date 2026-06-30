@@ -19,6 +19,7 @@ _DTYPES: dict[str, type[np.unsignedinteger[Any]]] = {
 }
 _FORMATS = {"bgr", "rgb", "gray"}
 _DEPTHS = {8, 16, 32}
+_OVERFLOW = {"clamp", "wrap"}
 _ANSI_YELLOW = "\033[33m"
 _ANSI_RESET = "\033[0m"
 
@@ -45,6 +46,13 @@ class DtypeConvert(Transformer):
                     choices=tuple(_DTYPES),
                     description="Output dtype.",
                 ),
+                "overflow": ParameterContract(
+                    "overflow",
+                    "str",
+                    required=True,
+                    choices=tuple(sorted(_OVERFLOW)),
+                    description="Overflow policy when converting to a narrower dtype.",
+                ),
             },
             description="Convert frame dtype without scaling values.",
             subcategory="Intensity",
@@ -52,6 +60,11 @@ class DtypeConvert(Transformer):
 
     def configure(self, params: dict[str, Any]) -> None:
         super().configure(params)
+        if "dtype" not in params:
+            raise ValueError("dtype-convert dtype is required")
+        if "overflow" not in params:
+            raise ValueError("dtype-convert overflow is required")
+
         self.dtype_name = str(params["dtype"])
         try:
             self.dtype = np.dtype(_DTYPES[self.dtype_name])
@@ -59,6 +72,9 @@ class DtypeConvert(Transformer):
             raise ValueError(
                 "dtype-convert dtype must be uint8, uint16, or uint32"
             ) from exc
+        self.overflow = str(params["overflow"])
+        if self.overflow not in _OVERFLOW:
+            raise ValueError("dtype-convert overflow must be clamp or wrap")
 
     def process(self, inputs: PacketInputs) -> PacketOutputs:
         packet = self._single_input(inputs)
@@ -76,11 +92,15 @@ class DtypeConvert(Transformer):
                 "dtype_converted_by": self.instance_id,
                 "dtype_convert_input_dtype": packet.data.dtype.name,
                 "dtype_convert_output_dtype": self.dtype.name,
+                "dtype_convert_overflow": self.overflow,
             },
         )
         return {"out": [FramePacket(data=converted, metadata=metadata)]}
 
     def _convert(self, frame: np.ndarray) -> np.ndarray:
+        if self.overflow == "wrap":
+            return frame.astype(self.dtype, copy=True)
+
         target_info = np.iinfo(self.dtype)
         clipped_mask = frame > target_info.max
         if np.any(clipped_mask):
