@@ -76,6 +76,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
     from src.transformers.meam import Meam
     from src.transformers.median import Median
     from src.transformers.morphology import Morphology
+    from src.transformers.non_linear import NonLinear
     from src.transformers.nl_means import NlMeans
     from src.transformers.progress import Progress
     from src.transformers.retinex import Retinex
@@ -98,6 +99,7 @@ def register_builtin_elements(registry: ElementRegistry = default_registry) -> N
         LinearScale,
         Clahe,
         Meam,
+        NonLinear,
         ToneCurve,
         Retinex,
         LocalContrast,

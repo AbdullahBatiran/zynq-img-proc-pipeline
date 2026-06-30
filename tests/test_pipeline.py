@@ -44,6 +44,7 @@ from src.transformers.log_filter import LogFilter
 from src.transformers.meam import Meam
 from src.transformers.median import Median
 from src.transformers.morphology import Morphology
+from src.transformers.non_linear import NonLinear
 from src.transformers.nl_means import NlMeans
 from src.transformers.progress import Progress
 from src.transformers.retinex import Retinex
@@ -117,6 +118,28 @@ def _reference_meam(
     detail_16bit = (detail / dynamic_range) * output_max * detail_gain
     enhanced = base_16bit + detail_16bit
     return np.clip(np.rint(enhanced), 0, output_max).astype(np.uint16)
+
+
+def _reference_non_linear(frame: np.ndarray, output_bits: int) -> np.ndarray:
+    output_max = (1 << output_bits) - 1
+    clipped = np.clip(frame, 0, output_max).astype(np.int64, copy=False)
+    histogram = np.bincount(clipped.ravel(), minlength=output_max + 1).astype(
+        np.uint64,
+        copy=False,
+    )
+    modified = np.zeros_like(histogram, dtype=np.uint64)
+    nonzero = histogram > 0
+    modified[nonzero] = np.floor(
+        np.log2(histogram[nonzero].astype(np.float64))
+    ).astype(np.uint64)
+    cumulative = np.cumsum(modified, dtype=np.uint64)
+    total = int(cumulative[-1]) if cumulative.size else 0
+    if total == 0:
+        lut = np.zeros(output_max + 1, dtype=frame.dtype)
+    else:
+        lut = np.rint(cumulative.astype(np.float64) * output_max / total)
+        lut = np.clip(lut, 0, output_max).astype(frame.dtype)
+    return lut[clipped].astype(frame.dtype, copy=False)
 
 
 class PipelineTests(unittest.TestCase):
@@ -280,6 +303,91 @@ class PipelineTests(unittest.TestCase):
         frame = np.zeros((8, 8, 4), dtype=np.uint8)
         with self.assertRaises(ValueError):
             transform.process({"in": packet(frame, fmt="bgr")})
+
+    def test_non_linear_matches_reference_uint8_gray(self) -> None:
+        frame = np.array(
+            [
+                [0, 0, 1, 2],
+                [2, 2, 3, 3],
+                [3, 4, 4, 4],
+                [5, 6, 7, 7],
+            ],
+            dtype=np.uint8,
+        )
+        source = packet(frame, fmt="gray")
+        result = NonLinear("nl", {"output-bits": 3}).process({"in": source})["out"][0]
+
+        expected = _reference_non_linear(frame, output_bits=3)
+        np.testing.assert_array_equal(result.data, expected)
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.metadata.depth, 8)
+        self.assertEqual(result.metadata.format, "gray")
+        self.assertEqual(result.metadata.channels, 1)
+        self.assertEqual(result.metadata.extra["non_linear_by"], "nl")
+        self.assertEqual(result.metadata.extra["non_linear_output_bits"], 3)
+        self.assertEqual(result.metadata.extra["non_linear_output_max"], 7)
+        self.assertEqual(result.metadata.extra["non_linear_levels"], 8)
+        self.assertIn("non_linear_modified_total", result.metadata.extra)
+        self.assertIn(source.metadata.packet_id, result.metadata.parents)
+
+    def test_non_linear_uint16_output_bits_14_keeps_container_depth(self) -> None:
+        frame = np.array(
+            [
+                [0, 100, 200, 20000],
+                [400, 400, 600, 30000],
+                [800, 1000, 1200, 65535],
+            ],
+            dtype=np.uint16,
+        )
+        result = NonLinear("nl", {"output-bits": 14}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint16)
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.metadata.depth, 16)
+        self.assertLessEqual(int(result.data.max()), 16383)
+        self.assertEqual(result.metadata.extra["non_linear_output_bits"], 14)
+        self.assertEqual(result.metadata.extra["non_linear_output_max"], 16383)
+        self.assertEqual(result.metadata.extra["non_linear_levels"], 16384)
+
+    def test_non_linear_zero_modified_histogram_outputs_zero(self) -> None:
+        frame = np.array([[0, 1], [2, 3]], dtype=np.uint8)
+        result = NonLinear("nl", {"output-bits": 4}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.data.tolist(), np.zeros_like(frame).tolist())
+        self.assertEqual(result.metadata.extra["non_linear_modified_total"], 0)
+
+    def test_non_linear_accepts_hxwx1_and_preserves_shape(self) -> None:
+        frame = np.array([[[0], [1]], [[1], [2]]], dtype=np.uint8)
+        result = NonLinear("nl", {"output-bits": 2}).process(
+            {"in": packet(frame, fmt="gray")}
+        )["out"][0]
+
+        self.assertEqual(result.data.shape, frame.shape)
+        self.assertEqual(result.metadata.channels, 1)
+
+    def test_non_linear_rejects_invalid_parameters_and_frames(self) -> None:
+        for params in ({"output-bits": 0}, {"output-bits": 17}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                NonLinear("nl", params)
+
+        transform = NonLinear("nl", {})
+        invalid_frames = [
+            packet(np.zeros((2, 2), dtype=np.float32), fmt="gray"),
+            packet(np.zeros((2, 2), dtype=np.uint8), fmt="bgr"),
+            packet(np.zeros((2, 2, 3), dtype=np.uint8), fmt="gray"),
+        ]
+        for invalid in invalid_frames:
+            with self.subTest(metadata=invalid.metadata), self.assertRaises(ValueError):
+                transform.process({"in": invalid})
+        with self.assertRaises(ValueError):
+            NonLinear("nl", {"output-bits": 9}).process(
+                {"in": packet(np.zeros((2, 2), dtype=np.uint8), fmt="gray")}
+            )
 
     def test_linear_scale_default_uint8_maps_min_max(self) -> None:
         transform = LinearScale("scale", {})
@@ -1807,7 +1915,7 @@ class PipelineTests(unittest.TestCase):
         spec = parse_pipeline_expression(
             "filesrc path=in.mp4 ! clahe clip-limit=2.0 tile-grid-size=4 "
             "! meam detail-gain=4.0 blur-sigma=10.0 output-bits=14 "
-            "! dog sigma-small=1.0 "
+            "! non-linear output-bits=14 ! dog sigma-small=1.0 "
             "sigma-large=3.0 ! progress every-frames=30 ! filesink path=out.mp4"
         )
 
@@ -1818,11 +1926,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(spec.elements[2].params["detail-gain"], 4.0)
         self.assertEqual(spec.elements[2].params["blur-sigma"], 10.0)
         self.assertEqual(spec.elements[2].params["output-bits"], 14)
-        self.assertEqual(spec.elements[3].type, "dog")
-        self.assertEqual(spec.elements[3].params["sigma-small"], 1.0)
-        self.assertEqual(spec.elements[3].params["sigma-large"], 3.0)
-        self.assertEqual(spec.elements[4].type, "progress")
-        self.assertEqual(spec.elements[4].params["every-frames"], 30)
+        self.assertEqual(spec.elements[3].type, "non-linear")
+        self.assertEqual(spec.elements[3].params["output-bits"], 14)
+        self.assertEqual(spec.elements[4].type, "dog")
+        self.assertEqual(spec.elements[4].params["sigma-small"], 1.0)
+        self.assertEqual(spec.elements[4].params["sigma-large"], 3.0)
+        self.assertEqual(spec.elements[5].type, "progress")
+        self.assertEqual(spec.elements[5].params["every-frames"], 30)
 
     def test_cli_parser_accepts_text_overlay_quoted_text(self) -> None:
         spec = parse_pipeline_expression(
@@ -2073,6 +2183,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("linear-scale", output)
         self.assertIn("clahe", output)
         self.assertIn("meam", output)
+        self.assertIn("non-linear", output)
         self.assertIn("tone-curve", output)
         self.assertIn("debug", output)
         self.assertIn("progress", output)
@@ -2091,6 +2202,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("fan-out               Control", output)
         self.assertIn("hist_equalize         Contrast", output)
         self.assertIn("linear-scale          Contrast", output)
+        self.assertIn("non-linear            Contrast", output)
         self.assertIn("debug                 Debug", output)
         self.assertIn("bilateral             Filter", output)
         self.assertIn("resize                Geometry", output)
@@ -2131,6 +2243,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("  Contrast\n    clahe", output)
         self.assertIn("    hist_equalize", output)
         self.assertIn("    meam", output)
+        self.assertIn("    non-linear", output)
         self.assertIn("Parameters: none", output)
         self.assertIn("    linear-scale", output)
         self.assertIn("    local-contrast", output)
@@ -2224,6 +2337,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("formats=[gray]", output)
         self.assertIn("depths=[16]", output)
         self.assertEqual(output.count("depths=[16]"), 2)
+
+    def test_cli_describe_non_linear_shows_element_details(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = cli_main(["describe", "non-linear"])
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Element: non-linear", output)
+        self.assertIn("Subcategory: Contrast", output)
+        self.assertIn("output-bits: int | optional", output)
+        self.assertIn("formats=[gray]", output)
+        self.assertEqual(output.count("depths=[8, 16]"), 2)
 
     def test_cli_describe_debug_shows_element_details(self) -> None:
         stdout = io.StringIO()
