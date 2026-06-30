@@ -1419,6 +1419,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.metadata.extra["dtype_convert_input_dtype"], "uint8")
         self.assertEqual(result.metadata.extra["dtype_convert_output_dtype"], "uint16")
         self.assertEqual(result.metadata.extra["dtype_convert_overflow"], "clamp")
+        self.assertTrue(result.metadata.extra["dtype_convert_warn"])
         self.assertIn(source.metadata.packet_id, result.metadata.parents)
 
     def test_dtype_convert_uint16_to_uint8_clips_and_warns(self) -> None:
@@ -1440,6 +1441,21 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("first clipped value=256 at row=0, col=2", stderr.getvalue())
         self.assertIn("\033[0m", stderr.getvalue())
         self.assertEqual(result.metadata.extra["dtype_convert_overflow"], "clamp")
+        self.assertTrue(result.metadata.extra["dtype_convert_warn"])
+
+    def test_dtype_convert_clamp_can_suppress_warning(self) -> None:
+        frame = np.array([[0, 255, 256, 1000]], dtype=np.uint16)
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            result = DtypeConvert(
+                "dtype", {"dtype": "uint8", "overflow": "clamp", "warn": False}
+            ).process({"in": packet(frame, fmt="gray")})["out"][0]
+
+        self.assertEqual(result.data.dtype, np.uint8)
+        self.assertEqual(result.data.tolist(), [[0, 255, 255, 255]])
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertFalse(result.metadata.extra["dtype_convert_warn"])
 
     def test_dtype_convert_uint32_color_to_uint16_clips(self) -> None:
         frame = np.array(
@@ -1485,6 +1501,7 @@ class PipelineTests(unittest.TestCase):
         np.testing.assert_array_equal(result.data, frame.astype(np.uint8))
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(result.metadata.extra["dtype_convert_overflow"], "wrap")
+        self.assertTrue(result.metadata.extra["dtype_convert_warn"])
 
     def test_dtype_convert_rejects_invalid_parameters_and_frames(self) -> None:
         with self.assertRaises(ValueError):
@@ -1959,13 +1976,14 @@ class PipelineTests(unittest.TestCase):
 
     def test_cli_parser_accepts_dtype_convert(self) -> None:
         spec = parse_pipeline_expression(
-            "filesrc path=in.mkv ! dtype-convert dtype=uint16 overflow=clamp "
+            "filesrc path=in.mkv ! dtype-convert dtype=uint16 overflow=clamp warn=false "
             "! filesink path=out.mp4"
         )
 
         self.assertEqual(spec.elements[1].type, "dtype-convert")
         self.assertEqual(spec.elements[1].params["dtype"], "uint16")
         self.assertEqual(spec.elements[1].params["overflow"], "clamp")
+        self.assertFalse(spec.elements[1].params["warn"])
 
     def test_cli_parser_accepts_filesink_quality(self) -> None:
         spec = parse_pipeline_expression(
@@ -2418,6 +2436,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Subcategory: Intensity", output)
         self.assertIn("dtype: str | required", output)
         self.assertIn("overflow: str | required", output)
+        self.assertIn("warn: bool | optional", output)
         self.assertIn("choices=[uint8, uint16, uint32]", output)
         self.assertIn("choices=[clamp, wrap]", output)
         self.assertIn("depths=[8, 16, 32]", output)

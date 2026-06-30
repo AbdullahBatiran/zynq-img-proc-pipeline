@@ -53,6 +53,12 @@ class DtypeConvert(Transformer):
                     choices=tuple(sorted(_OVERFLOW)),
                     description="Overflow policy when converting to a narrower dtype.",
                 ),
+                "warn": ParameterContract(
+                    "warn",
+                    "bool",
+                    default=True,
+                    description="Print a warning when clamp mode clips values.",
+                ),
             },
             description="Convert frame dtype without scaling values.",
             subcategory="Intensity",
@@ -75,6 +81,7 @@ class DtypeConvert(Transformer):
         self.overflow = str(params["overflow"])
         if self.overflow not in _OVERFLOW:
             raise ValueError("dtype-convert overflow must be clamp or wrap")
+        self.warn = _parse_bool(params.get("warn", True))
 
     def process(self, inputs: PacketInputs) -> PacketOutputs:
         packet = self._single_input(inputs)
@@ -93,6 +100,7 @@ class DtypeConvert(Transformer):
                 "dtype_convert_input_dtype": packet.data.dtype.name,
                 "dtype_convert_output_dtype": self.dtype.name,
                 "dtype_convert_overflow": self.overflow,
+                "dtype_convert_warn": self.warn,
             },
         )
         return {"out": [FramePacket(data=converted, metadata=metadata)]}
@@ -104,15 +112,18 @@ class DtypeConvert(Transformer):
         target_info = np.iinfo(self.dtype)
         clipped_mask = frame > target_info.max
         if np.any(clipped_mask):
-            first_location = tuple(int(index) for index in np.argwhere(clipped_mask)[0])
-            first_value = int(frame[first_location])
-            print(
-                f"{_ANSI_YELLOW}Warning: dtype-convert clipping values above "
-                f"{target_info.max} for output dtype {self.dtype.name}; "
-                f"first clipped value={first_value} at "
-                f"{_format_location(first_location)}{_ANSI_RESET}",
-                file=sys.stderr,
-            )
+            if self.warn:
+                first_location = tuple(
+                    int(index) for index in np.argwhere(clipped_mask)[0]
+                )
+                first_value = int(frame[first_location])
+                print(
+                    f"{_ANSI_YELLOW}Warning: dtype-convert clipping values above "
+                    f"{target_info.max} for output dtype {self.dtype.name}; "
+                    f"first clipped value={first_value} at "
+                    f"{_format_location(first_location)}{_ANSI_RESET}",
+                    file=sys.stderr,
+                )
             frame = np.clip(frame, target_info.min, target_info.max)
         return frame.astype(self.dtype, copy=True)
 
@@ -160,3 +171,15 @@ def _format_location(location: tuple[int, ...]) -> str:
         row, col, channel = location
         return f"row={row}, col={col}, channel={channel}"
     return "index=" + ",".join(str(index) for index in location)
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    return bool(value)
